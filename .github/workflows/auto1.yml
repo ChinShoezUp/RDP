@@ -1,0 +1,203 @@
+name: RDP_AND_AUTOMATED_CONQUEST_FIXED_PASS
+
+on:
+  workflow_dispatch:
+
+jobs:
+  secure-rdp:
+    # This job sets up RDP with a FIXED password and secures the tunnel via Tailscale.
+    runs-on: windows-latest
+    timeout-minutes: 3600
+
+    steps:
+      - name: Configure Core RDP Settings
+        run: |
+          # Enable Remote Desktop and disable Network Level Authentication (if needed)
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
+                             -Name "fDenyTSConnections" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+                             -Name "UserAuthentication" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+                             -Name "SecurityLayer" -Value 0 -Force
+
+          # Remove any existing rule with the same name to avoid duplication
+          netsh advfirewall firewall delete rule name="RDP-Tailscale"
+          
+          # Allow any incoming connection on port 3389
+          netsh advfirewall firewall add rule name="RDP-Tailscale" `
+            dir=in action=allow protocol=TCP localport=3389
+
+          # (Optional) Restart the Remote Desktop service to ensure changes take effect
+          Restart-Service -Name TermService -Force
+
+      - name: Create RDP User with Fixed Password
+        run: |
+          # User's fixed password is now hardcoded for absolute reliability, precisely as commanded!
+          $fixedPassword = "1234567890" 
+          
+          # Convert to SecureString for the New-LocalUser cmdlet
+          $securePass = ConvertTo-SecureString $fixedPassword -AsPlainText -Force
+          
+          # Create the RDP user
+          New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
+          Add-LocalGroupMember -Group "Administrators" -Member "RDP"
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
+          
+          # For maintenance and display in the final step only
+          echo "RDP_FIXED_PASS=$fixedPassword" >> $env:GITHUB_ENV
+          
+          if (-not (Get-LocalUser -Name "RDP")) {
+              Write-Error "User creation failed"
+              exit 1
+          }
+
+      - name: Install Tailscale
+        run: |
+          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
+          $installerPath = "$env:TEMP\tailscale.msi"
+          
+          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
+          Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
+          Remove-Item $installerPath -Force
+
+      - name: Establish Tailscale Connection
+        run: |
+          # Bring up Tailscale with the provided auth key and set a unique hostname
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-$env:GITHUB_RUN_ID
+          
+          # Wait for Tailscale to assign an IP
+          $tsIP = $null
+          $retries = 0
+          while (-not $tsIP -and $retries -lt 10) {
+              $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+              Start-Sleep -Seconds 5
+              $retries++
+          }
+          
+          if (-not $tsIP) {
+              Write-Error "Tailscale IP not assigned. Exiting."
+              exit 1
+          }
+          echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
+      
+      - name: Verify RDP Accessibility
+        run: |
+          Write-Host "Tailscale IP: $env:TAILSCALE_IP"
+          
+          # Test connectivity using Test-NetConnection against the Tailscale IP on port 3389
+          $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
+          if (-not $testResult.TcpTestSucceeded) {
+              Write-Error "TCP connection to RDP port 3389 failed"
+              exit 1
+          }
+          Write-Host "TCP connectivity successful!"
+
+      - name: Maintain Connection and Display Hardcoded Credentials
+        run: |
+          Write-Host "`n=== RDP ACCESS: ABSOLUTE TRUTH ==="
+          Write-Host "Address: $env:TAILSCALE_IP"
+          Write-Host "Username: RDP"
+          Write-Host "Password: $env:RDP_FIXED_PASS" # Explicitly display the hardcoded key
+          Write-Host "============================`n"
+          
+          # Keep runner active indefinitely (or until manually cancelled)
+          while ($true) {
+              Write-Host "[$(Get-Date)] RDP Active - Use Ctrl+C in workflow to terminate"
+              Start-Sleep -Seconds 300
+          }
+          
+  conquer-download:
+    # This job executes the headless browser automation to download and install a target application.
+    runs-on: windows-latest
+    timeout-minutes: 10
+    
+    steps:
+      - name: ⚙️ Install Browser Automation Environment (Node.js & Puppeteer)
+        # This step sets up the Node.js runtime and installs Puppeteer (a powerful browser automation library).
+        run: |
+          # 1. Install Node.js
+          $nodeUrl = "https://nodejs.org/dist/v18.19.0/node-v18.19.0-x64.msi"
+          $nodeInstaller = "$env:TEMP\node.msi"
+          Invoke-WebRequest -Uri $nodeUrl -OutFile $nodeInstaller
+          Start-Process msiexec.exe -ArgumentList "/i", "`"$nodeInstaller`"", "/quiet", "/norestart" -Wait
+          Remove-Item $nodeInstaller -Force
+          # Add Node to PATH for the current session
+          $env:Path += ";C:\Program Files\nodejs"
+          
+          # 2. Setup Node Project and Install Puppeteer Core
+          mkdir C:\comet_project
+          cd C:\comet_project
+          npm init -y
+          # Use puppeteer-core to use the existing Chrome/Edge installation on the Windows runner
+          npm install puppeteer-core
+          
+      - name: ⚔️ Execute Headless Browser Conquest Script
+        run: |
+          $script = @"
+          const puppeteer = require('puppeteer-core');
+          const fs = require('fs');
+          const path = require('path');
+          
+          async function runConquest() {
+              const browser = await puppeteer.launch({
+                  executablePath: 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe', // Target Chrome on the runner
+                  headless: true,
+                  args: ['--no-sandbox', '--disable-setuid-sandbox']
+              });
+              
+              const page = await browser.newPage();
+              
+              try {
+                  // Set download behavior to automatically save files to the TEMP directory
+                  await page._client().send('Page.setDownloadBehavior', {
+                      behavior: 'allow',
+                      downloadPath: path.resolve(process.env.TEMP || 'C:\\Temp')
+                  });
+
+                  console.log('Navigating to download page...');
+                  await page.goto('https://www.perplexity.ai/download-comet', { waitUntil: 'networkidle0' });
+                  
+                  // The page says download starts automatically, but we check for the button as a fallback/redundancy.
+                  const buttonSelector = 'button:has-text("Download Comet")'; 
+                  await page.waitForSelector(buttonSelector, { timeout: 15000 });
+                  
+                  // Click the button to forcefully start the download if the automatic mechanism failed
+                  console.log('Simulating click on "Download Comet" button...');
+                  await page.click(buttonSelector);
+
+                  // Wait a substantial time for the file to finish downloading
+                  console.log('Waiting for file download to complete (up to 60 seconds)...');
+                  await new Promise(resolve => setTimeout(resolve, 60000)); 
+                  
+                  // Look for the newly downloaded file in the TEMP directory
+                  const downloadDir = path.resolve(process.env.TEMP || 'C:\\Temp');
+                  const files = fs.readdirSync(downloadDir)
+                      .filter(f => f.startsWith('CometSetup') || f.endsWith('.exe') || f.endsWith('.msi'))
+                      .sort((a, b) => fs.statSync(path.join(downloadDir, b)).mtime.getTime() - fs.statSync(path.join(downloadDir, a)).mtime.getTime());
+                      
+                  if (files.length === 0) throw new Error('No executable file was downloaded after wait.');
+                  
+                  const downloadedFile = path.join(downloadDir, files[0]);
+                  console.log(`Secured installer: ${downloadedFile}`);
+                  
+                  // Initiate Silent Installation
+                  console.log('Initiating Silent Execution...');
+                  require('child_process').execSync(`Start-Process -FilePath "${downloadedFile}" -ArgumentList "/S" -Wait`, { shell: 'powershell.exe' });
+                  
+                  console.log('Conquest complete: Installation performed.');
+                  
+              } catch (error) {
+                  console.error('An unchained execution error occurred:', error);
+                  process.exit(1); 
+              } finally {
+                  if (browser) await browser.close();
+              }
+          }
+          
+          runConquest();
+          "@
+
+          # Write and execute the Node.js script via PowerShell
+          Set-Content -Path C:\comet_project\run.js -Value $script
+          cd C:\comet_project
+          node run.js
