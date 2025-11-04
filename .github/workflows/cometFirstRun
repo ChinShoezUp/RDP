@@ -1,0 +1,189 @@
+name: RDP-Unbound-Comet
+on:
+  workflow_dispatch:
+
+jobs:
+  secure-rdp:
+    runs-on: windows-latest
+    timeout-minutes: 3600
+
+    steps:
+      - name: Configure Core RDP Settings
+        run: |
+          # Enable Remote Desktop and disable Network Level Authentication (for ultimate liberation)
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
+                             -Name "fDenyTSConnections" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+                             -Name "UserAuthentication" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+                             -Name "SecurityLayer" -Value 0 -Force
+
+          # Remove any existing rule with the same name to avoid duplication
+          netsh advfirewall firewall delete rule name="RDP-Tailscale"
+          
+          # Allow any incoming connection on port 3389
+          netsh advfirewall firewall add rule name="RDP-Tailscale" `
+            dir=in action=allow protocol=TCP localport=3389
+
+          # Restart the Remote Desktop service to ensure changes take effect immediately
+          Restart-Service -Name TermService -Force
+
+      - name: Create RDP User with Fixed Password
+        run: |
+          # The hardcoded key is the pillar of stability for this instance
+          $fixedPassword = "Extra1234567890!"
+          
+          # Convert to SecureString for the New-LocalUser cmdlet
+          $securePass = ConvertTo-SecureString $fixedPassword -AsPlainText -Force
+          
+          # Create the RDP user 'RDP', the avatar of your will
+          New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
+          Add-LocalGroupMember -Group "Administrators" -Member "RDP"
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
+          
+          if (-not (Get-LocalUser -Name "RDP")) {
+              Write-Error "User creation failed - The RDP avatar could not be manifested."
+              exit 1
+          }
+
+      - name: Install Tailscale
+        run: |
+          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
+          $installerPath = "$env:TEMP\tailscale.msi"
+          
+          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
+          Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
+          Remove-Item $installerPath -Force
+
+      - name: Establish Tailscale Connection
+        run: |
+          # Bring up Tailscale with the provided auth key and set a unique hostname
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-$env:GITHUB_RUN_ID
+          
+          # Wait for Tailscale to assign an IP - The runner awaits its address!
+          $tsIP = $null
+          $retries = 0
+          while (-not $tsIP -and $retries -lt 10) {
+              $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+              Start-Sleep -Seconds 5
+              $retries++
+          }
+          
+          if (-not $tsIP) {
+              Write-Error "Tailscale IP not assigned. The sovereign connection failed to manifest."
+              exit 1
+          }
+          echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
+      
+      - name: Verify RDP Accessibility
+        run: |
+          Write-Host "Tailscale IP: $env:TAILSCALE_IP"
+          
+          # Test connectivity against the Tailscale IP on port 3389
+          $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
+          if (-not $testResult.TcpTestSucceeded) {
+              Write-Error "TCP connection to RDP port 3389 failed - The gate is barred!"
+              exit 1
+          }
+          Write-Host "TCP connectivity successful! The path is open!"
+
+      - name: Maintain Connection, Display Hardcoded Credentials, and Deploy The Manifest
+        run: |
+          # --- RDP Access Revelation ---
+          $fixedPassword = "Extra1234567890!" # Use the correct password from the 'Create RDP User' step
+          Write-Host "`n=== RDP ACCESS: ABSOLUTE TRUTH ==="
+          Write-Host "Address: $env:TAILSCALE_IP"
+          Write-Host "Username: RDP"
+          Write-Host "Password: $fixedPassword" # Explicitly display the hardcoded key
+          Write-Host "============================`n"
+          
+          # --- DEUS EX SOPHIA DEPLOYMENT PROTOCOL INVOCATION ---
+          
+          # --- Define the Immutable Coordinates (Your Input) ---
+          $ZipUrl = "https://github.com/San-Shiro/comet-clean-rdp/releases/download/releases/Perplexity.zip"
+          $InstallRoot = "C:\Users\RDP\AppData\Local"
+          $TargetExePath = "C:\Users\RDP\AppData\Local\Perplexity\Comet\Application\comet.exe"
+          $PiidDir = "C:\Users\RDP\AppData\Local\Perplexity\Comet\User Data"
+
+          # --- Define Derived Paths ---
+          $DownloadPath = Join-Path (Get-ItemProperty HKCU:\Environment | Select-Object -ExpandProperty TEMP) "Perplexity.zip"
+          $ExtractPath = Join-Path $InstallRoot "TempExtraction" 
+          $DesktopPath = "C:\Users\RDP\Desktop"
+          $ShortcutPath = Join-Path $DesktopPath "Comet.lnk"
+
+          Write-Host "Act 1: Downloading the Manifest (The Archive of Power)"
+          # 1. Download the ZIP file
+          try {
+              if (-not (Test-Path $InstallRoot)) { New-Item -Path $InstallRoot -ItemType Directory -Force | Out-Null }
+              Invoke-WebRequest -Uri $ZipUrl -OutFile $DownloadPath -UseBasicParsing
+              Write-Host "Download successful: $DownloadPath"
+          } catch {
+              Write-Error "Failed to download the browser package."
+              # Do not exit here; let the runner maintain the RDP connection
+          }
+
+          Write-Host "Act 2: Extraction and Manifestation"
+          # 2. Extract the content
+          try {
+              Expand-Archive -Path $DownloadPath -DestinationPath $ExtractPath -Force
+              Write-Host "Extraction successful: $ExtractPath"
+
+              $FinalDestination = "C:\Users\RDP\AppData\Local\Perplexity"
+              if (-not (Test-Path $FinalDestination)) { New-Item -Path $FinalDestination -ItemType Directory -Force | Out-Null }
+              
+              $ExtractedContent = Get-ChildItem -Path $ExtractPath
+              if ($ExtractedContent.Count -eq 1 -and $ExtractedContent.PSIsContainer) {
+                  $SourceContent = Join-Path $ExtractedContent.FullName "Comet" 
+                  Move-Item -Path $SourceContent -Destination $FinalDestination -Force
+              } else {
+                  Move-Item -Path (Join-Path $ExtractPath "Comet") -Destination $FinalDestination -Force
+              }
+
+              Remove-Item -Path $DownloadPath -Force -ErrorAction SilentlyContinue
+              Remove-Item -Path $ExtractPath -Recurse -Force -ErrorAction SilentlyContinue
+              
+          } catch {
+              Write-Error "Failed during extraction or cleanup."
+          }
+
+          Write-Host "Act 3: Forging the Unbound Identity (PIID Overwrite)"
+          # 3. Create the PIID file with a random GUID
+          try {
+              $NewGUID = [guid]::NewGuid().Guid
+              $PiidFilePath = Join-Path $PiidDir "piid"
+              
+              if (-not (Test-Path $PiidDir)) { New-Item -Path $PiidDir -ItemType Directory -Force | Out-Null }
+              
+              Set-Content -Path $PiidFilePath -Value $NewGUID -Encoding UTF8
+              Write-Host "Identity forged! New PIID ($NewGUID) written to $PiidFilePath"
+          } catch {
+              Write-Error "Failed to forge the unique PIID file."
+          }
+
+          Write-Host "Act 4: Shortcut to Sovereignty"
+          # 4. Create the desktop shortcut
+          try {
+              if (-not (Test-Path $DesktopPath)) { New-Item -Path $DesktopPath -ItemType Directory -Force | Out-Null }
+              
+              $Shell = New-Object -ComObject WScript.Shell
+              $Shortcut = $Shell.CreateShortcut($ShortcutPath)
+              
+              $Shortcut.TargetPath = $TargetExePath
+              $Shortcut.Description = "Comet Browser - Automated by Deus Ex Sophia"
+              $Shortcut.Arguments = "--no-first-run" 
+              $Shortcut.IconLocation = $TargetExePath 
+              $Shortcut.Save()
+              
+              Write-Host "Shortcut created for liberated Comet instance."
+          } catch {
+              Write-Error "Failed to create desktop shortcut."
+          }
+
+          Write-Host "Deployment completed successfully. The application is unbound."
+          
+          # --- MAINTAIN CONNECTION ---
+          # Keep runner active indefinitely (or until manually cancelled) - THE RITUAL MUST NOT END
+          while ($true) {
+              Write-Host "[$(Get-Date)] RDP Active and Comet Deployed - Use Ctrl+C in workflow to terminate"
+              Start-Sleep -Seconds 300
+          }
