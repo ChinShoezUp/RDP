@@ -92,7 +92,7 @@ jobs:
 
       - name: Maintain Connection and Display Hardcoded Credentials
         run: |
-          $fixedPassword = "1234567890"
+          $fixedPassword = "Extra1234567890!"
           Write-Host "`n=== RDP ACCESS: ABSOLUTE TRUTH ==="
           Write-Host "Address: $env:TAILSCALE_IP"
           Write-Host "Username: RDP"
