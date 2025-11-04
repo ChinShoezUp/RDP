@@ -1,19 +1,18 @@
-name: RDP Auto 1
+name: RDP_AND_TRIGGERED_CONQUEST
 
 on:
   workflow_dispatch:
 
 jobs:
   secure-rdp:
-    # This job sets up RDP with a FIXED password, establishes the Tailscale tunnel,
-    # and holds the connection open.
+    # This job sets up RDP, Tailscale, all automation dependencies, and prepares the final conquest script for manual execution.
     runs-on: windows-latest
     timeout-minutes: 3600
 
     steps:
       - name: Configure Core RDP Settings
         run: |
-          # Enable Remote Desktop and disable Network Level Authentication (if needed)
+          # RDP setup and firewall configuration (as previously commanded)
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
                              -Name "fDenyTSConnections" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
@@ -21,173 +20,149 @@ jobs:
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
                              -Name "SecurityLayer" -Value 0 -Force
 
-          # Remove any existing rule with the same name to avoid duplication
           netsh advfirewall firewall delete rule name="RDP-Tailscale"
-          
-          # Allow any incoming connection on port 3389
           netsh advfirewall firewall add rule name="RDP-Tailscale" `
             dir=in action=allow protocol=TCP localport=3389
-
-          # (Optional) Restart the Remote Desktop service to ensure changes take effect
           Restart-Service -Name TermService -Force
 
       - name: Create RDP User with Fixed Password
         run: |
-          # User's fixed password is now hardcoded for absolute reliability.
-          $fixedPassword = "Extra1234567890!" 
-          
-          # Convert to SecureString for the New-LocalUser cmdlet
+          # Fixed password setup (1234567890)
+          $fixedPassword = "1234567890" 
           $securePass = ConvertTo-SecureString $fixedPassword -AsPlainText -Force
-          
-          # Create the RDP user
           New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
           Add-LocalGroupMember -Group "Administrators" -Member "RDP"
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
-          
-          # For maintenance and display in the final step only
           echo "RDP_FIXED_PASS=$fixedPassword" >> $env:GITHUB_ENV
-          
-          if (-not (Get-LocalUser -Name "RDP")) {
-              Write-Error "User creation failed"
-              exit 1
-          }
+          if (-not (Get-LocalUser -Name "RDP")) { Write-Error "User creation failed"; exit 1 }
 
-      - name: Install Tailscale
+      - name: Install Tailscale & Establish Connection
         run: |
+          # Tailscale installation and IP retrieval
           $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
           $installerPath = "$env:TEMP\tailscale.msi"
-          
           Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
           Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
           Remove-Item $installerPath -Force
 
-      - name: Establish Tailscale Connection
-        run: |
-          # Bring up Tailscale with the provided auth key and set a unique hostname
           & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-$env:GITHUB_RUN_ID
-          
-          # Wait for Tailscale to assign an IP
-          $tsIP = $null
-          $retries = 0
-          while (-not $tsIP -and $retries -lt 10) {
-              $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
-              Start-Sleep -Seconds 5
-              $retries++
-          }
-          
-          if (-not $tsIP) {
-              Write-Error "Tailscale IP not assigned. Exiting."
-              exit 1
-          }
+          $tsIP = $null; $retries = 0
+          while (-not $tsIP -and $retries -lt 10) { $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4; Start-Sleep -Seconds 5; $retries++ }
+          if (-not $tsIP) { Write-Error "Tailscale IP not assigned. Exiting."; exit 1 }
           echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
-      
+
       - name: Verify RDP Accessibility
         run: |
           Write-Host "Tailscale IP: $env:TAILSCALE_IP"
-          
-          # Test connectivity using Test-NetConnection against the Tailscale IP on port 3389
           $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
-          if (-not $testResult.TcpTestSucceeded) {
-              Write-Error "TCP connection to RDP port 3389 failed"
-              exit 1
-          }
+          if (-not $testResult.TcpTestSucceeded) { Write-Error "TCP connection to RDP port 3389 failed"; exit 1 }
           Write-Host "TCP connectivity successful!"
 
-      - name: Maintain Connection and Display Hardcoded Credentials
+      - name: ⚙️ Install Automation Environment and Prepare Script
         run: |
-          Write-Host "`n=== RDP ACCESS: ABSOLUTE TRUTH ==="
-          Write-Host "Address: $env:TAILSCALE_IP"
-          Write-Host "Username: RDP"
-          Write-Host "Password: $env:RDP_FIXED_PASS" # Explicitly display the hardcoded key
-          Write-Host "============================`n"
-          
-          # Keep runner active indefinitely (or until manually cancelled)
-          while ($true) {
-              Write-Host "[$(Get-Date)] RDP Active - Use Ctrl+C in workflow to terminate"
-              Start-Sleep -Seconds 300
-          }
-          
-  conquer-download:
-    # CRITICAL: This line forces the job to wait until 'secure-rdp' has finished successfully.
-    needs: [secure-rdp]
-    # This job executes the headless browser automation to download and install a target application.
-    runs-on: windows-latest
-    timeout-minutes: 10
-    
-    steps:
-      - name: ⚙️ Install Browser Automation Environment (Node.js & Puppeteer)
-        # This step sets up the Node.js runtime and installs Puppeteer (a powerful browser automation library).
-        run: |
-          # 1. Install Node.js
+          # 1. Install Node.js (for Puppeteer execution)
           $nodeUrl = "https://nodejs.org/dist/v18.19.0/node-v18.19.0-x64.msi"
           $nodeInstaller = "$env:TEMP\node.msi"
           Invoke-WebRequest -Uri $nodeUrl -OutFile $nodeInstaller
           Start-Process msiexec.exe -ArgumentList "/i", "`"$nodeInstaller`"", "/quiet", "/norestart" -Wait
           Remove-Item $nodeInstaller -Force
-          # Add Node to PATH for the current session
           $env:Path += ";C:\Program Files\nodejs"
           
-          # 2. Setup Node Project and Install Puppeteer Core
-          mkdir C:\comet_project
-          cd C:\comet_project
+          # 2. Setup Project and Install Puppeteer Core
+          mkdir C:\conquest
+          cd C:\conquest
           npm init -y
-          # Use puppeteer-core to use the existing Chrome/Edge installation on the Windows runner
           npm install puppeteer-core
           
-      - name: ⚔️ Execute Headless Browser Conquest Script
-        run: |
+          # 3. Write the complex multi-tab script to C:\conquest\run.js
           $script = @"
           const puppeteer = require('puppeteer-core');
           const fs = require('fs');
           const path = require('path');
+          const DOWNLOAD_URL = 'https://pplx.ai/chinshoeup3892';
+          const EMAIL_URL = 'https://etempmail.com/';
+          const CHROME_PATH = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
+          const DOWNLOAD_DIR = path.resolve(process.env.TEMP || 'C:\\Temp');
           
           async function runConquest() {
               const browser = await puppeteer.launch({
-                  executablePath: 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe', // Target Chrome on the runner
-                  headless: true,
+                  executablePath: CHROME_PATH, headless: true,
                   args: ['--no-sandbox', '--disable-setuid-sandbox']
               });
               
-              const page = await browser.newPage();
+              const page1 = await browser.newPage(); // Sign-up tab
+              const page2 = await browser.newPage(); // Email tab
               
               try {
-                  // Set download behavior to automatically save files to the TEMP directory
-                  await page._client().send('Page.setDownloadBehavior', {
-                      behavior: 'allow',
-                      downloadPath: path.resolve(process.env.TEMP || 'C:\\Temp')
+                  await page1._client().send('Page.setDownloadBehavior', {
+                      behavior: 'allow', downloadPath: DOWNLOAD_DIR
                   });
 
-                  console.log('Navigating to download page...');
-                  await page.goto('https://www.perplexity.ai/download-comet', { waitUntil: 'networkidle0' });
+                  await Promise.all([
+                      page1.goto(DOWNLOAD_URL, { waitUntil: 'networkidle0' }),
+                      page2.goto(EMAIL_URL, { waitUntil: 'networkidle0' })
+                  ]);
                   
-                  // The page says download starts automatically, but we check for the button as a fallback/redundancy.
-                  const buttonSelector = 'button:has-text("Download Comet")'; 
-                  await page.waitForSelector(buttonSelector, { timeout: 15000 });
-                  
-                  // Click the button to forcefully start the download if the automatic mechanism failed
-                  console.log('Simulating click on "Download Comet" button...');
-                  await page.click(buttonSelector);
+                  // Extract Temp Email
+                  const emailSelector = '#currentMail'; 
+                  await page2.waitForSelector(emailSelector, { timeout: 15000 });
+                  const tempEmail = await page2.evaluate(sel => document.querySelector(sel).value, emailSelector);
+                  console.log(\`Secured Temp Email: \${tempEmail}\`);
 
-                  // Wait a substantial time for the file to finish downloading
-                  console.log('Waiting for file download to complete (up to 60 seconds)...');
-                  await new Promise(resolve => setTimeout(resolve, 60000)); 
+                  if (!tempEmail || !tempEmail.includes('@')) throw new Error('Failed to capture a valid temporary email.');
                   
-                  // Look for the newly downloaded file in the TEMP directory
-                  const downloadDir = path.resolve(process.env.TEMP || 'C:\\Temp');
-                  const files = fs.readdirSync(downloadDir)
-                      .filter(f => f.startsWith('CometSetup') || f.endsWith('.exe') || f.endsWith('.msi'))
-                      .sort((a, b) => fs.statSync(path.join(downloadDir, b)).mtime.getTime() - fs.statSync(path.join(downloadDir, a)).mtime.getTime());
+                  // Input Email and Request Code
+                  await page1.bringToFront();
+                  const emailInputSelector = 'input[type="email"]'; 
+                  const submitButtonSelector = 'button[type="submit"]'; 
+                  await page1.waitForSelector(emailInputSelector, { timeout: 10000 });
+                  await page1.type(emailInputSelector, tempEmail);
+                  await page1.click(submitButtonSelector); 
+                  console.log('Email submitted, awaiting verification code...');
+
+                  // Monitor Email Tab for Verification Code
+                  await page2.bringToFront();
+                  let verificationCode = null; let attempts = 0; const maxAttempts = 15; 
+                  while (verificationCode === null && attempts < maxAttempts) {
+                      attempts++;
+                      console.log(\`Checking email inbox (Attempt \${attempts}/\${maxAttempts})...\`);
+                      await page2.goto(\`\${EMAIL_URL}email?id=1\`, { waitUntil: 'networkidle2' }); 
+                      const emailBodyText = await page2.evaluate(() => document.body.innerText);
+                      const codeMatch = emailBodyText.match(/\\b\\d{6}\\b/); 
                       
-                  if (files.length === 0) throw new Error('No executable file was downloaded after wait.');
+                      if (codeMatch) { verificationCode = codeMatch[0]; break; }
+                      if (attempts < maxAttempts) await new Promise(resolve => setTimeout(resolve, 10000));
+                  }
                   
-                  const downloadedFile = path.join(downloadDir, files[0]);
-                  console.log(`Secured installer: ${downloadedFile}`);
+                  if (!verificationCode) throw new Error('Failed to retrieve verification code within the time limit.');
+
+                  // Input Code and Finalize Sign-up
+                  await page1.bringToFront();
+                  const codeInputSelector = 'input[inputmode="numeric"]'; 
+                  await page1.waitForSelector(codeInputSelector, { timeout: 10000 });
+                  await page1.type(codeInputSelector, verificationCode);
+                  await page1.click(submitButtonSelector); 
+                  console.log('Verification code submitted. Awaiting redirect to download...');
+                  await page1.waitForNavigation({ waitUntil: 'networkidle0' }); 
                   
-                  // Initiate Silent Installation
-                  console.log('Initiating Silent Execution...');
-                  require('child_process').execSync(`Start-Process -FilePath "${downloadedFile}" -ArgumentList "/S" -Wait`, { shell: 'powershell.exe' });
+                  // Verify Download and Initiate Silent Installation
+                  console.log('Waiting for CometSetup download to complete (up to 45 seconds)...');
+                  await new Promise(resolve => setTimeout(resolve, 45000)); 
                   
-                  console.log('Conquest complete: Installation performed.');
+                  const files = fs.readdirSync(DOWNLOAD_DIR)
+                      .filter(f => f.toLowerCase().includes('comet') && f.endsWith('.exe'))
+                      .sort((a, b) => fs.statSync(path.join(DOWNLOAD_DIR, b)).mtime.getTime() - fs.statSync(path.join(DOWNLOAD_DIR, a)).mtime.getTime());
+                      
+                  if (files.length === 0) throw new Error('No Comet executable file was downloaded after wait.');
+                  
+                  const downloadedFile = path.join(DOWNLOAD_DIR, files[0]);
+                  console.log(\`Installer Conquest Complete: \${downloadedFile}\`);
+                  
+                  // Silent Installation
+                  console.log('Initiating Silent Execution of Comet Setup...');
+                  require('child_process').execSync(\`Start-Process -FilePath "\${downloadedFile}" -ArgumentList "/S" -Wait\`, { shell: 'powershell.exe' });
+                  
+                  console.log('Conquest complete: Comet Installation performed.');
                   
               } catch (error) {
                   console.error('An unchained execution error occurred:', error);
@@ -200,7 +175,22 @@ jobs:
           runConquest();
           "@
 
-          # Write and execute the Node.js script via PowerShell
-          Set-Content -Path C:\comet_project\run.js -Value $script
-          cd C:\comet_project
-          node run.js
+          Set-Content -Path C:\conquest\run.js -Value $script
+
+      - name: Maintain Connection and Display Manual Command
+        run: |
+          Write-Host "`n=== RDP ACCESS: ABSOLUTE TRUTH ==="
+          Write-Host "Address: $env:TAILSCALE_IP"
+          Write-Host "Username: RDP"
+          Write-Host "Password: $env:RDP_FIXED_PASS"
+          Write-Host "============================`n"
+          Write-Host "MANUAL CONQUEST COMMAND: Execute this in the RDP console:"
+          Write-Host ">> $manual_command"
+          $manual_command = "cd C:\conquest; node run.js"
+          Write-Host "============================`n"
+          
+          # Keep runner active indefinitely (or until manually cancelled)
+          while ($true) {
+              Write-Host "[$(Get-Date)] RDP Active - Awaiting manual command trigger..."
+              Start-Sleep -Seconds 300
+          }
