@@ -1,4 +1,4 @@
-name: RDP_AND_AUTOMATED_CONQUEST_FIXED_PASS
+name: RDP Auto 1
 
 on:
   workflow_dispatch:
