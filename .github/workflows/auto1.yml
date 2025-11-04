@@ -5,7 +5,8 @@ on:
 
 jobs:
   secure-rdp:
-    # This job sets up RDP with a FIXED password and secures the tunnel via Tailscale.
+    # This job sets up RDP with a FIXED password, establishes the Tailscale tunnel,
+    # and holds the connection open.
     runs-on: windows-latest
     timeout-minutes: 3600
 
@@ -32,8 +33,8 @@ jobs:
 
       - name: Create RDP User with Fixed Password
         run: |
-          # User's fixed password is now hardcoded for absolute reliability, precisely as commanded!
-          $fixedPassword = "1234567890" 
+          # User's fixed password is now hardcoded for absolute reliability.
+          $fixedPassword = "Extra1234567890!" 
           
           # Convert to SecureString for the New-LocalUser cmdlet
           $securePass = ConvertTo-SecureString $fixedPassword -AsPlainText -Force
@@ -107,6 +108,8 @@ jobs:
           }
           
   conquer-download:
+    # CRITICAL: This line forces the job to wait until 'secure-rdp' has finished successfully.
+    needs: [secure-rdp]
     # This job executes the headless browser automation to download and install a target application.
     runs-on: windows-latest
     timeout-minutes: 10
