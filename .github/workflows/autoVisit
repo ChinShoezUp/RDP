@@ -1,0 +1,115 @@
+      - name: Create interactive scheduled task to open Firefox, wait 15s, then cancel workflow
+        env:
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          # Config
+          $user = "RDP"
+          $password = "Extra1234567890!"   # <-- replace with ${{ secrets.RDP_PASSWORD }} if available
+          $url = "https://example.com"     # <-- change to target URL
+          $waitSeconds = 15                # <-- 15 seconds as requested
+          $profileDir = "C:\Users\RDP"
+          $scriptPath = Join-Path $profileDir "RunFirefoxVisitAndCancel.ps1"
+          $infoPath = Join-Path $profileDir "run_cancel_info.env"
+          $firefoxPath = "C:\Program Files\Mozilla Firefox\firefox.exe"
+
+          # Make sure profile dir exists
+          if (-not (Test-Path $profileDir)) { New-Item -Path $profileDir -ItemType Directory -Force | Out-Null }
+
+          # --- Write "info" file with run identifiers and token (token injected from secrets) ---
+          $ownerRepo = "${{ github.repository }}"  # "owner/repo"
+          $runId = "${{ github.run_id }}"
+
+          # Token MUST be stored in repository secrets as ACTIONS_CANCEL_TOKEN
+          $token = "${{ secrets.ACTIONS_CANCEL_TOKEN }}"
+
+          $envContent = @"
+GITHUB_REPOSITORY=$ownerRepo
+GITHUB_RUN_ID=$runId
+ACTIONS_CANCEL_TOKEN=$token
+"@
+          Set-Content -Path $infoPath -Value $envContent -Encoding UTF8 -Force
+
+          # Lock file so only RDP and Administrators can read (grant RDP and remove Everyone)
+          icacls $infoPath /inheritance:r | Out-Null
+          icacls $infoPath /grant "RDP:R" | Out-Null
+          icacls $infoPath /grant "Administrators:R" | Out-Null
+          icacls $infoPath /remove "Users" "Everyone" | Out-Null
+
+          # --- Create the PowerShell wrapper script that the scheduled task will run ---
+          $script = @"
+# RunFirefoxVisitAndCancel.ps1
+param()
+
+# Read run info
+\$info = Get-Content -Path `"$infoPath`" -ErrorAction Stop | ForEach-Object {
+    if (\$_ -match '^\s*([^=]+)=(.*)\s*$') { @{ Key = \$matches[1]; Value = \$matches[2] } }
+} | ForEach-Object { \$psobj = New-Object PSObject -Property @{ } ; \$psobj | Add-Member -MemberType NoteProperty -Name \$_.Key -Value \$_.Value ; \$psobj }
+
+# Fallback read as simple key=value if above parsing didn't produce
+if (-not (Test-Path `"$infoPath`")) { Write-Error "run info file missing"; exit 1 }
+\$kv = @{ }
+Get-Content -Path `"$infoPath`" | ForEach-Object {
+    if (\$_ -match '^\s*([^=]+)=(.*)\s*$') { \$kv[\$matches[1]] = \$matches[2] }
+}
+
+\$ownerRepo = \$kv['GITHUB_REPOSITORY']
+\$runId = \$kv['GITHUB_RUN_ID']
+\$token = \$kv['ACTIONS_CANCEL_TOKEN']
+
+# Start Firefox to URL
+Start-Process -FilePath `"$firefoxPath`" -ArgumentList `"$url`" -ErrorAction SilentlyContinue
+Start-Sleep -Seconds $waitSeconds
+
+# Attempt graceful close then force
+Get-Process -Name firefox -ErrorAction SilentlyContinue | ForEach-Object {
+    try { \$_.CloseMainWindow() | Out-Null } catch {}
+}
+Start-Sleep -Seconds 2
+Get-Process -Name firefox -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+
+# Cancel the GitHub Actions workflow run via REST API
+if (\$ownerRepo -and \$runId -and \$token) {
+    \$parts = \$ownerRepo.Split('/')
+    \$owner = \$parts[0]; \$repo = \$parts[1]
+    \$uri = "https://api.github.com/repos/\$owner/\$repo/actions/runs/\$runId/cancel"
+    try {
+        # Use GitHub API to cancel
+        Invoke-RestMethod -Method Post -Uri \$uri -Headers @{ Authorization = "Bearer \$token"; "User-Agent"="gh-action-canceller" } -ErrorAction Stop
+        Start-Sleep -Seconds 2
+    } catch {
+        Write-Warning "Failed to cancel workflow via API: \$($_.Exception.Message)"
+    }
+} else {
+    Write-Warning "Missing owner/repo/runId/token — cannot cancel workflow automatically."
+}
+
+# Remove the scheduled task (cleanup)
+try {
+    schtasks /Delete /TN "RDP_Firefox_Visit" /F | Out-Null
+} catch {}
+
+# Remove the info file (cleanup)
+try { Remove-Item -Path `"$infoPath`" -Force -ErrorAction SilentlyContinue } catch {}
+
+"@
+
+          # Save wrapper script
+          Set-Content -Path $scriptPath -Value $script -Encoding UTF8 -Force
+
+          # Secure the script for RDP user
+          icacls $scriptPath /inheritance:r | Out-Null
+          icacls $scriptPath /grant "RDP:R" | Out-Null
+          icacls $scriptPath /grant "Administrators:R" | Out-Null
+          icacls $scriptPath /remove "Users" "Everyone" | Out-Null
+
+          # Create interactive scheduled task to run the script at next logon (runs in desktop session)
+          $taskName = "RDP_Firefox_Visit"
+          $taskAction = "powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Normal -File `"$scriptPath`""
+          $createCmd = "schtasks /Create /TN `"$taskName`" /TR `"$taskAction`" /SC ONLOGON /RL HIGHEST /RU $user /RP $password /F /IT"
+          Write-Host "Creating scheduled task: $createCmd"
+          Invoke-Expression $createCmd
+
+          Write-Host "Scheduled task created. Sign in to user '$user' interactively; the task will open Firefox, wait $waitSeconds seconds, then cancel the workflow run ($runId)."
