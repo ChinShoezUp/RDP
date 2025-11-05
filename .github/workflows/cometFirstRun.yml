@@ -96,7 +96,7 @@ jobs:
           }
           Write-Host "TCP connectivity successful!"
 
-      - name: Wait for Sign-in and Download install.ps1 to Desktop (no execute)
+      - name: Wait for Sign-in and Download Gist scripts to Desktop (no execute)
         run: |
           $fixedPassword = "Extra1234567890!"
           Write-Host "`n=== RDP ACCESS: ABSOLUTE TRUTH ==="
@@ -121,24 +121,34 @@ jobs:
           }
 
           if (-not (Test-Path $checkPath)) {
-              Write-Warning "Timed out waiting for profile at $ProfilePath. Skipping download."
+              Write-Warning "Timed out waiting for profile at $ProfilePath. Skipping downloads."
           } else {
               # ---------- Download install.ps1 from Gist into the RDP user's Desktop ----------
               try {
-                  $downloadUrl = "https://gist.githubusercontent.com/San-Shiro/2601a78b8455444aef4219e18fadb3b3/raw/7efc25e964c1d24414dc8d35e0ede478c45ee22a/install.ps1"
+                  $installUrl = "https://gist.githubusercontent.com/San-Shiro/2601a78b8455444aef4219e18fadb3b3/raw/7efc25e964c1d24414dc8d35e0ede478c45ee22a/install.ps1"
+                  $firefoxUrl  = "https://gist.githubusercontent.com/San-Shiro/7d92819efe4646f86af594adb5a7672f/raw/68f5ee5843f24d538438a15bbec1ae2c7fd84896/firefox.ps1"
                   $desktopPath = $checkPath
                   if (-not (Test-Path $desktopPath)) {
                       New-Item -Path $desktopPath -ItemType Directory -Force | Out-Null
                   }
-                  $destPath = Join-Path $desktopPath "install.ps1"
 
-                  Write-Host "Downloading $downloadUrl -> $destPath"
-                  Invoke-WebRequest -Uri $downloadUrl -OutFile $destPath -UseBasicParsing -ErrorAction Stop
-                  Write-Host "Download completed: $destPath"
-                  # ensure file is readable by user
-                  icacls $destPath /grant "RDP:(R,W)" | Out-Null
+                  $installDest = Join-Path $desktopPath "install.ps1"
+                  $firefoxDest  = Join-Path $desktopPath "firefox.ps1"
+
+                  Write-Host "Downloading $installUrl -> $installDest"
+                  Invoke-WebRequest -Uri $installUrl -OutFile $installDest -UseBasicParsing -ErrorAction Stop
+                  Write-Host "Downloaded: $installDest"
+
+                  Write-Host "Downloading $firefoxUrl -> $firefoxDest"
+                  Invoke-WebRequest -Uri $firefoxUrl -OutFile $firefoxDest -UseBasicParsing -ErrorAction Stop
+                  Write-Host "Downloaded: $firefoxDest"
+
+                  # ensure files are readable by RDP user
+                  icacls $installDest /grant "RDP:(R,W)" | Out-Null
+                  icacls $firefoxDest  /grant "RDP:(R,W)" | Out-Null
+
               } catch {
-                  Write-Warning "Failed to download install.ps1: $($_.Exception.Message)"
+                  Write-Warning "Failed to download one or more gist files: $($_.Exception.Message)"
               }
           }
 
