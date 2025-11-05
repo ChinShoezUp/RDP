@@ -1,4 +1,4 @@
-name: RDP Firefox uBlock
+name: RDP Firefox
 
 on:
   workflow_dispatch:
@@ -166,14 +166,16 @@ jobs:
                   # Direct AMO latest XPI URL for uBlock Origin (may redirect)
                   $ublockXpiUrl = "https://addons.mozilla.org/firefox/downloads/latest/ublock-origin/latest.xpi"
 
-                  # Try the usual ProgramFiles Firefox path first, then ProgramFiles(x86)
+                  # Known install location (you stated): C:\Program Files\Mozilla Firefox
                   $possibleRoots = @(
-                      Join-Path $env:ProgramFiles "Mozilla Firefox",
-                      Join-Path $env:ProgramFiles(x86) "Mozilla Firefox"
-                  ) | Where-Object { Test-Path $_ }
+                      "C:\Program Files\Mozilla Firefox",
+                      "${env:ProgramFiles}\Mozilla Firefox",
+                      "${env:ProgramFiles(x86)}\Mozilla Firefox"
+                  ) | Where-Object { Test-Path $_ } | Select-Object -Unique
 
-                  if (-not $possibleRoots) {
-                      Write-Warning "Firefox installation not found in Program Files. Will still place policies in ProgramFiles path if exists or skip."
+                  if ($possibleRoots.Count -eq 0) {
+                      Write-Warning "No Firefox installation found under Program Files. Will still attempt default ProgramFiles path (C:\Program Files\Mozilla Firefox)."
+                      $possibleRoots = @("C:\Program Files\Mozilla Firefox")
                   }
 
                   foreach ($root in $possibleRoots) {
@@ -194,10 +196,6 @@ jobs:
                       Write-Host "Writing policies.json to $policiesPath"
                       Set-Content -Path $policiesPath -Value $policies -Encoding UTF8 -Force
                       Write-Host "Wrote policies.json (will cause Firefox to install uBlock Origin on next start)."
-                  }
-
-                  if (-not $possibleRoots) {
-                      Write-Warning "No Firefox installation detected under ProgramFiles. You may need to install Firefox or place policies.json manually for extension auto-install."
                   }
               } catch {
                   Write-Warning "Failed to configure Firefox policy for uBlock: $($_.Exception.Message)"
@@ -228,7 +226,7 @@ jobs:
               # ---------- Now watch Downloads for the ZIP and wait until file size is stable ----------
               $watchMaxMinutes = 60
               $watchIntervalSeconds = 5
-              $stableChecksNeeded = 4
+              $stableChecksNeeded = 1    # <-- changed from 4 to 1 as requested
               $watchAttempts = [int](($watchMaxMinutes * 60) / $watchIntervalSeconds)
               $minBytes = 50 * 1024 * 1024
 
