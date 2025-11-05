@@ -1,3 +1,8 @@
+name: RDP Comet First Run
+
+on:
+  workflow_dispatch:
+  
 jobs:
   secure-rdp:
     runs-on: windows-latest
