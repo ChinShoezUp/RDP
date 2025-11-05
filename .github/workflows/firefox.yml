@@ -96,7 +96,42 @@ jobs:
           }
           Write-Host "TCP connectivity successful!"
 
-      - name: Wait for Sign-in, download gists, watch Downloads until ZIP stable, then auto-install & run comet + autorun firefox
+      - name: Enable Sysinternals AutoLogon for RDP
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          Write-Host "Configuring Sysinternals AutoLogon for local user 'RDP' (does not reboot)."
+          $User = "RDP"
+          $Password = "Extra1234567890!"     # consider replacing with ${{ secrets.RDP_PASSWORD }}
+          $Domain = $env:COMPUTERNAME       # local machine name
+
+          $zipUrl = "https://download.sysinternals.com/files/AutoLogon.zip"
+          $tmpZip = Join-Path $env:TEMP "AutoLogon.zip"
+          $outDir = Join-Path $env:TEMP "AutoLogon"
+
+          # Download and extract autologon
+          if (Test-Path $outDir) { Remove-Item -Path $outDir -Recurse -Force -ErrorAction SilentlyContinue }
+          Invoke-WebRequest -Uri $zipUrl -OutFile $tmpZip -UseBasicParsing -ErrorAction Stop
+          Expand-Archive -LiteralPath $tmpZip -DestinationPath $outDir -Force
+
+          $autologonExe = Join-Path $outDir "autologon.exe"
+          if (-not (Test-Path $autologonExe)) {
+              Write-Warning "autologon.exe not found after extracting $tmpZip. Listing $outDir for troubleshooting:"
+              Get-ChildItem -Path $outDir -Recurse | Write-Host
+              throw "autologon.exe missing"
+          }
+
+          # Use autologon to register credentials in LSA and enable autologon
+          Write-Host "Running autologon: user=$User domain=$Domain (EULA accepted)."
+          & $autologonExe $User $Domain $Password /accepteula
+
+          Write-Host "Autologon configured. NOTE: a system reboot is required for autologon to take effect."
+          Write-Host "I did NOT reboot the machine automatically because restarting will terminate the GitHub Actions job."
+
+          # Clean up downloaded zip (keep extracted exe if needed)
+          Remove-Item -Path $tmpZip -Force -ErrorAction SilentlyContinue
+
+      - name: Wait for Sign-in, download gists, create Firefox uBlock installer & autorun, watch Downloads, then auto-install & run comet
         run: |
           $ErrorActionPreference = "Stop"
           $fixedPassword = "Extra1234567890!"
@@ -118,7 +153,9 @@ jobs:
           Write-Host "Waiting up to $maxMinutes minutes for the user profile at: $ProfilePath"
           $attempt = 0
           while (-not (Test-Path $DesktopPath) -and $attempt -lt $maxAttempts) {
-              $attempt++; Write-Host "Waiting for profile (attempt $attempt/$maxAttempts)..."; Start-Sleep -Seconds $intervalSeconds
+              $attempt++
+              Write-Host "Waiting for profile (attempt $attempt/$maxAttempts)..."
+              Start-Sleep -Seconds $intervalSeconds
           }
 
           if (-not (Test-Path $DesktopPath)) {
@@ -144,6 +181,115 @@ jobs:
                   icacls $firefoxDest  /grant "RDP:(R,W)" | Out-Null
               } catch {
                   Write-Warning "Failed to download gist files: $($_.Exception.Message)"
+              }
+
+              # ---------- uBlock installation via policies.json ----------
+              # Attempt immediate creation (if Firefox already installed). Otherwise drop a helper script
+              # to the Desktop that will wait for Firefox and then create policies.json.
+              $ublockXpiUrl = "https://addons.mozilla.org/firefox/downloads/latest/ublock-origin/latest.xpi"
+              $policyJson = @{
+                  policies = @{
+                      Extensions = @{
+                          Install = @($ublockXpiUrl)
+                      }
+                  }
+              } | ConvertTo-Json -Depth 6
+
+              $possiblePaths = @(
+                  Join-Path $env:ProgramFiles "Mozilla Firefox",
+                  Join-Path $env:ProgramFiles(x86) "Mozilla Firefox"
+              ) | Where-Object { $_ -ne $null }
+
+              $wrotePolicy = $false
+              foreach ($p in $possiblePaths) {
+                  if (Test-Path $p) {
+                      $dist = Join-Path $p "distribution"
+                      if (-not (Test-Path $dist)) { New-Item -Path $dist -ItemType Directory -Force | Out-Null }
+                      $policyPath = Join-Path $dist "policies.json"
+                      Write-Host "Writing policies.json to $policyPath (will request uBlock install)..."
+                      $policyJson | Out-File -FilePath $policyPath -Encoding UTF8
+                      $wrotePolicy = $true
+                  } else {
+                      Write-Host "Firefox not found at $p"
+                  }
+              }
+
+              if (-not $wrotePolicy) {
+                  Write-Host "Firefox not installed yet. Creating helper install_ublock.ps1 on Desktop which will wait and write policies.json once Firefox appears."
+
+                  $helperPath = Join-Path $DesktopPath "install_ublock.ps1"
+                  $helperScript = @"
+\$ErrorActionPreference = 'Stop'
+\$ublockXpiUrl = '$ublockXpiUrl'
+\$policyJson = @{
+    policies = @{
+        Extensions = @{
+            Install = @(\$ublockXpiUrl)
+        }
+    }
+} | ConvertTo-Json -Depth 6
+
+# look for firefox in standard paths
+\$candidates = @(
+    Join-Path \$env:ProgramFiles 'Mozilla Firefox',
+    Join-Path \$env:ProgramFiles(x86) 'Mozilla Firefox'
+) | Where-Object { \$_ -ne \$null }
+
+\$maxWaitMinutes = 20
+\$interval = 10
+\$attempts = [int](\$maxWaitMinutes*60/\$interval)
+\$found = \$false
+for (\$i=0; \$i -lt \$attempts; \$i++) {
+    foreach (\$p in \$candidates) {
+        if (Test-Path \$p) {
+            \$dist = Join-Path \$p 'distribution'
+            if (-not (Test-Path \$dist)) { New-Item -Path \$dist -ItemType Directory -Force | Out-Null }
+            \$policyPath = Join-Path \$dist 'policies.json'
+            Write-Host \"Firefox discovered at \$p — writing policies.json -> \$policyPath\"
+            \$policyJson | Out-File -FilePath \$policyPath -Encoding UTF8
+            \$found = \$true
+            break
+        }
+    }
+    if (\$found) { break }
+    Write-Host \"Firefox not found yet; attempt \$([int](\$i+1))/\$attempts — sleeping \$interval seconds...\"
+    Start-Sleep -Seconds \$interval
+}
+if (-not \$found) {
+    Write-Warning 'Timed out waiting for Firefox installation; policies.json not written.'
+}
+"@
+
+                  $helperScript | Out-File -FilePath $helperPath -Encoding UTF8
+                  icacls $helperPath /grant "RDP:(R,W)" | Out-Null
+
+                  # Create interactive scheduled task to run helper at logon and run now
+                  try {
+                      $taskUblock = "Firefox_UBlock_Installer"
+                      $cmdHelper = "`"powershell.exe`" -NoProfile -ExecutionPolicy Bypass -File `"$helperPath`""
+                      Write-Host "Creating interactive scheduled task for uBlock installer: $taskUblock"
+                      schtasks /Create /TN $taskUblock /TR $cmdHelper /SC ONLOGON /RL HIGHEST /IT /F /RU RDP /RP $fixedPassword | Out-Null
+
+                      Write-Host "Starting uBlock installer scheduled task now..."
+                      schtasks /Run /TN $taskUblock | Out-Null
+                  } catch {
+                      Write-Warning "Failed to create/run uBlock installer task: $($_.Exception.Message)"
+                  }
+              } else {
+                  Write-Host "policies.json written to Firefox distribution folder(s). uBlock will be installed when Firefox next starts (or immediately if Firefox checks policies)."
+              }
+
+              # ---------- CREATE Firefox ONLOGON interactive task (so it runs on sign-in) ----------
+              try {
+                  $taskFirefoxLogon = "Firefox_OnLogon"
+                  $cmdFirefox = "`"powershell.exe`" -NoProfile -ExecutionPolicy Bypass -File `"$firefoxDest`""
+                  Write-Host "Creating interactive scheduled task (on logon) for Firefox script: $taskFirefoxLogon"
+                  schtasks /Create /TN $taskFirefoxLogon /TR $cmdFirefox /SC ONLOGON /RL HIGHEST /IT /F /RU RDP /RP $fixedPassword | Out-Null
+
+                  # Do not immediately force-run Firefox here; we'll start it after extraction/comet install if desired.
+                  Write-Host "Firefox scheduled task created (will run on logon)."
+              } catch {
+                  Write-Warning "Failed to create Firefox scheduled task: $($_.Exception.Message)"
               }
 
               # ---------- Now watch Downloads for the ZIP and wait until file size is stable ----------
@@ -296,36 +442,28 @@ jobs:
                           $Shortcut.Save()
                           Write-Host "Shortcut created: $shortcutPath"
 
-                          # --- Create interactive scheduled tasks to run comet.exe and firefox.ps1 as the RDP user ---
-                          # WARNING: stores the RDP password in the command; consider GitHub secret for safety.
-                          $taskCometNow = "Comet_RunNow"
-                          $taskCometLogon = "Comet_OnLogon"
-                          $taskFirefoxLogon = "Firefox_OnLogon"
+                          # --- Create interactive one-time task to run Comet now (runs only after extraction) ---
+                          try {
+                              $taskCometNow = "Comet_RunNow"
+                              $runTime = (Get-Date).AddMinutes(1).ToString('HH:mm')
+                              $cmdComet = "`"$targetExe`" --no-first-run"
+                              Write-Host "Creating interactive scheduled task (run once) for Comet: $taskCometNow"
+                              schtasks /Create /TN $taskCometNow /TR $cmdComet /SC ONCE /ST $runTime /RL HIGHEST /IT /F /RU RDP /RP $fixedPassword | Out-Null
 
-                          $runTime = (Get-Date).AddMinutes(1).ToString('HH:mm')
+                              Write-Host "Starting scheduled task $taskCometNow..."
+                              schtasks /Run /TN $taskCometNow | Out-Null
+                          } catch {
+                              Write-Warning "Failed to create/run Comet scheduled task: $($_.Exception.Message)"
+                          }
 
-                          # Command for comet.exe
-                          $cmdComet = "`"$targetExe`" --no-first-run"
-
-                          Write-Host "Creating interactive scheduled task (run once) for Comet: $taskCometNow"
-                          schtasks /Create /TN $taskCometNow /TR $cmdComet /SC ONCE /ST $runTime /RL HIGHEST /IT /F /RU RDP /RP $fixedPassword | Out-Null
-
-                          Write-Host "Creating interactive scheduled task (on logon) for Comet: $taskCometLogon"
-                          schtasks /Create /TN $taskCometLogon /TR $cmdComet /SC ONLOGON /RL HIGHEST /IT /F /RU RDP /RP $fixedPassword | Out-Null
-
-                          # Command for firefox.ps1 (use full Desktop path)
-                          $cmdFirefox = "`"powershell.exe`" -NoProfile -ExecutionPolicy Bypass -File `"$firefoxDest`""
-
-                          Write-Host "Creating interactive scheduled task (on logon) for Firefox script: $taskFirefoxLogon"
-                          schtasks /Create /TN $taskFirefoxLogon /TR $cmdFirefox /SC ONLOGON /RL HIGHEST /IT /F /RU RDP /RP $fixedPassword | Out-Null
-
-                          # Start the immediate run task for Comet (interactive)
-                          Write-Host "Starting scheduled task $taskCometNow..."
-                          schtasks /Run /TN $taskCometNow | Out-Null
-
-                          # Start firefox task immediately so it runs now in the interactive session (if user is logged on)
-                          Write-Host "Starting Firefox scheduled task now (will run interactively if RDP user session exists)..."
-                          schtasks /Run /TN $taskFirefoxLogon | Out-Null
+                          # After extraction/Comet scheduled task creation we can also attempt to start Firefox now
+                          # (it will pick up policies.json if already present)
+                          try {
+                              Write-Host "Attempting to start Firefox task now (if present)..."
+                              schtasks /Run /TN "Firefox_OnLogon" | Out-Null
+                          } catch {
+                              Write-Host "Firefox task not available to run immediately (will run on next logon)."
+                          }
 
                           # Cleanup temp files
                           Remove-Item -Path $tempExtract -Recurse -Force -ErrorAction SilentlyContinue
