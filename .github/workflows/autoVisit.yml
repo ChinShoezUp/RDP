@@ -1,4 +1,4 @@
-      - name: Create interactive scheduled task to open Firefox, wait 15s, then cancel workflow
+      - name: AutoVisit
         env:
           GITHUB_REPOSITORY: ${{ github.repository }}
           GITHUB_RUN_ID: ${{ github.run_id }}
