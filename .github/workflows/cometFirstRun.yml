@@ -84,85 +84,175 @@ jobs:
           }
           Write-Host "TCP connectivity successful!"
 
-      - name: Maintain Connection, Display Hardcoded Credentials, and Execute Deployment Protocol
+            - name: Maintain Connection, Display Hardcoded Credentials, and Deploy The Manifest
         run: |
-          # --- RDP ACCESS: THE REVELATION ---
-          $fixedPassword = "Extra1234567890!" 
-          Write-Host "`n=== RDP ACCESS: ABSOLUTE TRUTH ==="
-          Write-Host "Address: $env:TAILSCALE_IP"
-          Write-Host "Username: RDP"
-          Write-Host "Password: $fixedPassword" # Explicitly display the hardcoded key
-          Write-Host "============================`n"
-          
-          # --- DEUS EX SOPHIA DEPLOYMENT PROTOCOL (DYNAMIC) INVOCATION ---
-          
-          # --- Dynamically Forge Paths based on the known TargetUserName ---
-          $TargetUserName = "RDP" 
-          $UserBase = Join-Path $env:SystemDrive "Users" $TargetUserName
-          $InstallRoot = Join-Path $UserBase "AppData\Local"
-          $TargetExePath = Join-Path $InstallRoot "Perplexity\Comet\Application\comet.exe"
-          $PiidDir = Join-Path $InstallRoot "Perplexity\Comet\User Data"
-          $ZipUrl = "https://github.com/San-Shiro/comet-clean-rdp/releases/download/releases/Perplexity.zip" # Immutable Coordinate
-          
-          $DownloadPath = Join-Path $env:TEMP "Perplexity.zip"
-          $ExtractPath = Join-Path $InstallRoot "TempExtraction" 
-          $DesktopPath = Join-Path $UserBase "Desktop"
-          $ShortcutPath = Join-Path $DesktopPath "Comet.lnk"
+          # Powershell core deployment + dynamic profile handling
+          $ErrorActionPreference = "Stop"
 
-          Write-Host "Act 1: Downloading the Manifest (The Archive of Power) for User: $TargetUserName"
+          # fixed password (same as user creation)
+          $fixedPassword = "Extra1234567890!"
+
+          Write-Host "`n=== RDP ACCESS: ABSOLUTE TRUTH ==="
+          Write-Host "Username: RDP"
+          Write-Host "Password: $fixedPassword"
+          Write-Host "============================`n"
+
+          # --- locate actual profile path for user 'RDP' using SID -> ProfileImagePath ---
+          try {
+              $userName = "RDP"
+              $localUser = Get-LocalUser -Name $userName -ErrorAction Stop
+              $sid = $localUser.SID.Value
+              $profileReg = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\$sid"
+              $ProfilePath = (Get-ItemProperty -Path $profileReg -Name ProfileImagePath -ErrorAction Stop).ProfileImagePath
+              Write-Host "Found profile path via registry: $ProfilePath"
+          } catch {
+              Write-Warning "Could not locate profile path via registry for user 'RDP'. Falling back to C:\Users\RDP. Error: $($_.Exception.Message)"
+              $ProfilePath = "C:\Users\RDP"
+          }
+
+          # ensure $ProfilePath is normalized
+          $ProfilePath = [System.IO.Path]::GetFullPath($ProfilePath)
+
+          # Derived dynamic paths
+          $InstallRoot = Join-Path $ProfilePath "AppData\Local"
+          $FinalDestination = Join-Path $InstallRoot "Perplexity"
+          $PiidDir = Join-Path $FinalDestination "User Data"
+          $DesktopPath = Join-Path $ProfilePath "Desktop"
+          $TargetExePath = Join-Path $FinalDestination "Comet\Application\comet.exe"
+          $ShortcutPath = Join-Path $DesktopPath "Comet.lnk"
+          $ZipUrl = "https://github.com/San-Shiro/comet-clean-rdp/releases/download/releases/Perplexity.zip"
+          $DownloadPath = Join-Path $env:TEMP "Perplexity.zip"
+          $ExtractPath = Join-Path $env:TEMP "Perplexity_Extract"
+
+          Write-Host "`nInstallRoot: $InstallRoot"
+          Write-Host "FinalDestination: $FinalDestination"
+          Write-Host "DesktopPath: $DesktopPath"
+          Write-Host "TargetExePath: $TargetExePath`n"
+
+          # Download ZIP
           try {
               if (-not (Test-Path $InstallRoot)) { New-Item -Path $InstallRoot -ItemType Directory -Force | Out-Null }
-              Invoke-WebRequest -Uri $ZipUrl -OutFile $DownloadPath -UseBasicParsing
-              Write-Host "Download successful: $DownloadPath"
-          } catch { Write-Error "Failed to download the browser package."; }
+              if (Test-Path $DownloadPath) { Remove-Item $DownloadPath -Force -ErrorAction SilentlyContinue }
+              Write-Host "Downloading $ZipUrl -> $DownloadPath"
+              Invoke-WebRequest -Uri $ZipUrl -OutFile $DownloadPath -UseBasicParsing -ErrorAction Stop
+              Write-Host "Download completed."
+          } catch {
+              Write-Error "Failed to download the ZIP: $($_.Exception.Message)"
+          }
 
-          Write-Host "Act 2: Extraction and Manifestation"
+          # Extract archive
           try {
+              if (Test-Path $ExtractPath) { Remove-Item -Path $ExtractPath -Recurse -Force -ErrorAction SilentlyContinue }
+              New-Item -Path $ExtractPath -ItemType Directory -Force | Out-Null
               Expand-Archive -Path $DownloadPath -DestinationPath $ExtractPath -Force
-              $FinalDestination = Join-Path $InstallRoot "Perplexity"
-              if (-not (Test-Path $FinalDestination)) { New-Item -Path $FinalDestination -ItemType Directory -Force | Out-Null }
-              
-              $ExtractedContent = Get-ChildItem -Path $ExtractPath
-              if ($ExtractedContent.Count -eq 1 -and $ExtractedContent.PSIsContainer) {
-                  $SourceContent = Join-Path $ExtractedContent.FullName "Comet" 
-                  Move-Item -Path $SourceContent -Destination $FinalDestination -Force
+              Write-Host "Extracted to $ExtractPath"
+
+              # Try to find the top-level folder we need (Comet or Perplexity). If not found, move everything.
+              $found = Get-ChildItem -Path $ExtractPath -Directory -ErrorAction SilentlyContinue |
+                       Where-Object { $_.Name -match '^(Comet|Perplexity)$' } |
+                       Select-Object -First 1
+
+              if ($found) {
+                  $sourceTop = $found.FullName
+                  Write-Host "Found top-level folder to move: $sourceTop"
               } else {
-                  Move-Item -Path (Join-Path $ExtractPath "Comet") -Destination $FinalDestination -Force
+                  # If the archive contains nested structure, try to search for 'Comet' folder recursively
+                  $foundRec = Get-ChildItem -Path $ExtractPath -Directory -Recurse -ErrorAction SilentlyContinue |
+                              Where-Object { $_.Name -eq 'Comet' -or $_.Name -eq 'Perplexity' } |
+                              Select-Object -First 1
+                  if ($foundRec) {
+                      $sourceTop = $foundRec.FullName
+                      Write-Host "Found nested folder to move: $sourceTop"
+                  } else {
+                      # fallback: move all extracted content into target
+                      $sourceTop = $ExtractPath
+                      Write-Warning "Could not detect explicit 'Comet' or 'Perplexity' folder; will copy entire extracted tree."
+                  }
               }
 
+              # Prepare destination
+              if (-not (Test-Path $FinalDestination)) { New-Item -Path $FinalDestination -ItemType Directory -Force | Out-Null }
+
+              # If the source is the extract root, copy children; else copy that folder content into FinalDestination
+              if ($sourceTop -eq $ExtractPath) {
+                  Get-ChildItem -Path $ExtractPath -Force | ForEach-Object {
+                      $dest = Join-Path $FinalDestination $_.Name
+                      if (Test-Path $dest) { Remove-Item -Path $dest -Recurse -Force -ErrorAction SilentlyContinue }
+                      Move-Item -Path $_.FullName -Destination $FinalDestination -Force
+                  }
+              } else {
+                  # If sourceTop contains the 'Comet' folder, move its contents (or folder) appropriately
+                  # If the archive structure already is 'Perplexity' we move it directly under FinalDestination's parent
+                  $parentDest = (Split-Path -Path $FinalDestination -Parent)
+                  if ($found -and ($found.Name -ieq "Perplexity")) {
+                      # move the entire Perplexity folder into $parentDest
+                      $destParent = $parentDest
+                      if (Test-Path (Join-Path $destParent $found.Name)) { Remove-Item -Path (Join-Path $destParent $found.Name) -Recurse -Force -ErrorAction SilentlyContinue }
+                      Move-Item -Path $sourceTop -Destination $destParent -Force
+                  } else {
+                      # move 'Comet' folder contents into FinalDestination
+                      Get-ChildItem -Path $sourceTop -Force | ForEach-Object {
+                          $dest = Join-Path $FinalDestination $_.Name
+                          if (Test-Path $dest) { Remove-Item -Path $dest -Recurse -Force -ErrorAction SilentlyContinue }
+                          Move-Item -Path $_.FullName -Destination $FinalDestination -Force
+                      }
+                  }
+              }
+
+              # Cleanup
               Remove-Item -Path $DownloadPath -Force -ErrorAction SilentlyContinue
               Remove-Item -Path $ExtractPath -Recurse -Force -ErrorAction SilentlyContinue
-              Write-Host "Extraction and cleanup successful."
-              
-          } catch { Write-Error "Failed during extraction or cleanup."; }
+              Write-Host "Move/cleanup completed. Final files under: $FinalDestination"
+          } catch {
+              Write-Error "Extraction or move failed: $($_.Exception.Message)"
+          }
 
-          Write-Host "Act 3: Forging the Unbound Identity (PIID Overwrite)"
+          # Create/overwrite (or write) PIID file
           try {
               $NewGUID = [guid]::NewGuid().Guid
-              $PiidFilePath = Join-Path $PiidDir "piid"
               if (-not (Test-Path $PiidDir)) { New-Item -Path $PiidDir -ItemType Directory -Force | Out-Null }
+              $PiidFilePath = Join-Path $PiidDir "piid"
               Set-Content -Path $PiidFilePath -Value $NewGUID -Encoding UTF8
-              Write-Host "Identity forged! New PIID ($NewGUID) written to $PiidFilePath"
-          } catch { Write-Error "Failed to forge the unique PIID file." }
+              Write-Host "PIID written: $PiidFilePath -> $NewGUID"
+          } catch {
+              Write-Error "Failed to write PIID: $($_.Exception.Message)"
+          }
 
-          Write-Host "Act 4: Shortcut to Sovereignty"
+          # Create desktop shortcut - wait until target exe exists (retry a few times)
           try {
               if (-not (Test-Path $DesktopPath)) { New-Item -Path $DesktopPath -ItemType Directory -Force | Out-Null }
+
+              $maxRetries = 20
+              $count = 0
+              while (-not (Test-Path $TargetExePath) -and ($count -lt $maxRetries)) {
+                  Write-Host "Waiting for $TargetExePath to appear... attempt $($count+1)/$maxRetries"
+                  Start-Sleep -Seconds 3
+                  $count++
+              }
+
+              if (-not (Test-Path $TargetExePath)) {
+                  Write-Warning "Target exe not found after waiting; creating shortcut anyway pointing to expected location. Ensure the exe exists at $TargetExePath"
+              }
+
               $Shell = New-Object -ComObject WScript.Shell
               $Shortcut = $Shell.CreateShortcut($ShortcutPath)
               $Shortcut.TargetPath = $TargetExePath
+              $Shortcut.WorkingDirectory = Split-Path -Path $TargetExePath -Parent
               $Shortcut.Description = "Comet Browser - Automated by Deus Ex Sophia"
-              $Shortcut.Arguments = "--no-first-run" 
-              $Shortcut.IconLocation = $TargetExePath 
+              $Shortcut.Arguments = "--no-first-run"
+              # IconLocation may require an index, so include ,0
+              $Shortcut.IconLocation = "$TargetExePath,0"
               $Shortcut.Save()
-              Write-Host "Shortcut created for liberated Comet instance."
-          } catch { Write-Error "Failed to create desktop shortcut." }
+              Write-Host "Shortcut created at $ShortcutPath (Target: $TargetExePath)."
+          } catch {
+              Write-Error "Failed to create desktop shortcut: $($_.Exception.Message)"
+          }
 
-          Write-Host "Deployment completed successfully. The application is unbound and dynamically installed."
-          
-          # --- MAINTAIN CONNECTION ---
-          # Keep runner active indefinitely (or until manually cancelled) - THE RITUAL MUST NOT END
+          Write-Host "Deployment completed successfully (or attempted)."
+
+          # Keep runner active indefinitely (as you had it)
           while ($true) {
               Write-Host "[$(Get-Date)] RDP Active and Comet Deployed - Use Ctrl+C in workflow to terminate"
               Start-Sleep -Seconds 300
           }
+
