@@ -1,4 +1,4 @@
-name: RDP Firefox
+name: RDP First Run Bypass
 
 on:
   workflow_dispatch:
@@ -209,7 +209,7 @@ jobs:
                       }
                       $info = Get-Item $filePath
                       $size = $info.Length
-                      Write-Host "  per-file size check #$perFileAttempt: $size bytes (prev $prevSize)"
+                      Write-Host "  per-file size check #$($perFileAttempt): $size bytes (prev $prevSize)"
                       if ($size -eq $prevSize) {
                           $stableCount++
                           Write-Host "  stableCount = $stableCount"
