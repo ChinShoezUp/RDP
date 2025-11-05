@@ -1,4 +1,4 @@
-name: RDP First Run Bypass
+name: RDP Firefox
 
 on:
   workflow_dispatch:
