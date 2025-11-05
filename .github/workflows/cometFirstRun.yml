@@ -1,4 +1,4 @@
-name: RDP First Run
+name: RDP First Run Bypass
 
 on:
   workflow_dispatch:
@@ -11,7 +11,7 @@ jobs:
     steps:
       - name: Configure Core RDP Settings
         run: |
-          # Enable Remote Desktop and disable Network Level Authentication (if needed)
+          # Enable Remote Desktop and (optionally) disable Network Level Authentication
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
                              -Name "fDenyTSConnections" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
@@ -20,7 +20,7 @@ jobs:
                              -Name "SecurityLayer" -Value 0 -Force
 
           # Remove any existing rule with the same name to avoid duplication
-          netsh advfirewall firewall delete rule name="RDP-Tailscale"
+          netsh advfirewall firewall delete rule name="RDP-Tailscale" || Write-Host "No existing rule"
           
           # Allow any incoming connection on port 3389
           netsh advfirewall firewall add rule name="RDP-Tailscale" `
@@ -37,14 +37,17 @@ jobs:
           # Convert to SecureString for the New-LocalUser cmdlet
           $securePass = ConvertTo-SecureString $fixedPassword -AsPlainText -Force
           
-          # Create the RDP user
-          New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
-          Add-LocalGroupMember -Group "Administrators" -Member "RDP"
-          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
-          
-          # NO GITHUB_ENV or RANDOMIZATION IS USED
-          
-          if (-not (Get-LocalUser -Name "RDP")) {
+          # Create the RDP user (idempotent: skip if already exists)
+          if (-not (Get-LocalUser -Name "RDP" -ErrorAction SilentlyContinue)) {
+              New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
+              Add-LocalGroupMember -Group "Administrators" -Member "RDP"
+              Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
+              Write-Host "Created user RDP"
+          } else {
+              Write-Host "User RDP already exists — skipping creation"
+          }
+
+          if (-not (Get-LocalUser -Name "RDP" -ErrorAction SilentlyContinue)) {
               Write-Error "User creation failed"
               exit 1
           }
@@ -54,20 +57,22 @@ jobs:
           $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
           $installerPath = "$env:TEMP\tailscale.msi"
           
-          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
+          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath -UseBasicParsing -ErrorAction Stop
           Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
-          Remove-Item $installerPath -Force
+          Remove-Item $installerPath -Force -ErrorAction SilentlyContinue
 
       - name: Establish Tailscale Connection
         run: |
           # Bring up Tailscale with the provided auth key and set a unique hostname
-          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-$env:GITHUB_RUN_ID
+          $hostname = "gh-runner-$($env:GITHUB_RUN_ID)"
+          $tsExe = Join-Path $env:ProgramFiles "Tailscale\tailscale.exe"
+          & $tsExe up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=$hostname
           
           # Wait for Tailscale to assign an IP
           $tsIP = $null
           $retries = 0
           while (-not $tsIP -and $retries -lt 10) {
-              $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+              $tsIP = & $tsExe ip -4
               Start-Sleep -Seconds 5
               $retries++
           }
@@ -76,7 +81,8 @@ jobs:
               Write-Error "Tailscale IP not assigned. Exiting."
               exit 1
           }
-          echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
+          Add-Content -Path $env:GITHUB_ENV -Value "TAILSCALE_IP=$tsIP"
+          Write-Host "TAILSCALE_IP = $tsIP"
       
       - name: Verify RDP Accessibility
         run: |
@@ -90,7 +96,7 @@ jobs:
           }
           Write-Host "TCP connectivity successful!"
 
-      - name: Maintain Connection and Display Hardcoded Credentials
+      - name: Maintain Connection, Wait for Sign-in, Download & Execute comet.ps1, Display Credentials
         run: |
           $fixedPassword = "Extra1234567890!"
           Write-Host "`n=== RDP ACCESS: ABSOLUTE TRUTH ==="
@@ -99,20 +105,45 @@ jobs:
           Write-Host "Password: $fixedPassword" # Explicitly display the hardcoded key
           Write-Host "============================`n"
 
-          # --- Download comet.ps1 into the Downloads folder ---
-          try {
-              $downloadUrl = "https://github.com/San-Shiro/comet-clean-rdp/releases/download/releases/comet.ps1"
-              $downloadFolder = Join-Path $env:USERPROFILE "Downloads"
-              if (-not (Test-Path $downloadFolder)) {
-                  New-Item -Path $downloadFolder -ItemType Directory -Force | Out-Null
-              }
-              $destPath = Join-Path $downloadFolder "comet.ps1"
+          # ---------- Wait for the interactive user profile (RDP) to be created ----------
+          $ProfilePath = "C:\Users\RDP"                      # you requested 'RDP'
+          $checkPath = Join-Path $ProfilePath "Desktop"      # Desktop presence signals interactive sign-in
+          $maxMinutes = 20                                   # time to wait before giving up
+          $intervalSeconds = 6
+          $maxAttempts = [int](($maxMinutes * 60) / $intervalSeconds)
 
-              Write-Host "Downloading $downloadUrl to $destPath"
-              Invoke-WebRequest -Uri $downloadUrl -OutFile $destPath -UseBasicParsing -ErrorAction Stop
-              Write-Host "Download completed: $destPath"
-          } catch {
-              Write-Warning "Failed to download comet.ps1: $($_.Exception.Message)"
+          Write-Host "Waiting up to $maxMinutes minutes for the user profile at: $ProfilePath"
+          $attempt = 0
+          while (-not (Test-Path $checkPath) -and $attempt -lt $maxAttempts) {
+              $attempt++
+              Write-Host "Waiting for profile (attempt $attempt/$maxAttempts)..."
+              Start-Sleep -Seconds $intervalSeconds
+          }
+
+          if (-not (Test-Path $checkPath)) {
+              Write-Warning "Timed out waiting for profile at $ProfilePath. Skipping download+execute."
+          } else {
+              # ---------- Download comet.ps1 into the RDP user's Downloads folder ----------
+              try {
+                  $downloadUrl = "https://github.com/San-Shiro/comet-clean-rdp/releases/download/releases/comet.ps1"
+                  $downloadFolder = Join-Path $ProfilePath "Downloads"
+                  if (-not (Test-Path $downloadFolder)) {
+                      New-Item -Path $downloadFolder -ItemType Directory -Force | Out-Null
+                  }
+                  $destPath = Join-Path $downloadFolder "comet.ps1"
+
+                  Write-Host "Downloading $downloadUrl -> $destPath"
+                  Invoke-WebRequest -Uri $downloadUrl -OutFile $destPath -UseBasicParsing -ErrorAction Stop
+                  Write-Host "Download completed: $destPath"
+
+                  # ---------- Execute the downloaded script ----------
+                  Write-Host "Executing downloaded script: $destPath"
+                  # Use Start-Process to ensure the script runs; wait for it to complete
+                  Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$destPath`"" -Wait -NoNewWindow
+                  Write-Host "Execution completed (exit code captured by PowerShell)."
+              } catch {
+                  Write-Warning "Download or execution failed: $($_.Exception.Message)"
+              }
           }
 
           # Keep runner active indefinitely (or until manually cancelled)
