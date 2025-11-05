@@ -101,7 +101,7 @@ jobs:
           $ErrorActionPreference = "Stop"
 
           $fixedPassword = "Extra1234567890!"
-          Write-Host "`n=== RDP ACCESS: ABSOLUTE TRUTH ==="
+          Write-Host "`n=== RDP ACCESS INFO ==="
           Write-Host "Address: $env:TAILSCALE_IP"
           Write-Host "Username: RDP"
           Write-Host "Password: $fixedPassword" # Explicitly display the hardcoded key
@@ -160,42 +160,52 @@ jobs:
               $stableChecksNeeded = 4          # require this many consecutive identical sizes (=> stable)
               $watchAttempts = [int](($watchMaxMinutes * 60) / $watchIntervalSeconds)
 
-              Write-Host "Watching $DownloadsPath for a Perplexity zip. Will wait up to $watchMaxMinutes minutes for a stable file."
+              # minimum size threshold (50 MB) to ignore tiny temp files
+              $minBytes = 50 * 1024 * 1024
+
+              Write-Host "Watching $DownloadsPath for a Perplexity zip (.zip only). Will wait up to $watchMaxMinutes minutes for a stable file >= $minBytes bytes."
               $foundZip = $null
               $attempt = 0
               while ($attempt -lt $watchAttempts -and -not $foundZip) {
                   $attempt++
-                  # prefer Perplexity*.zip first
+                  # prefer Perplexity*.zip first (only .zip extension)
                   $candidate = Get-ChildItem -Path $DownloadsPath -Filter "Perplexity*.zip" -File -ErrorAction SilentlyContinue | Select-Object -First 1
                   if (-not $candidate) {
+                      # fallback: any .zip only
                       $candidate = Get-ChildItem -Path $DownloadsPath -Filter "*.zip" -File -ErrorAction SilentlyContinue | Select-Object -First 1
                   }
                   if ($candidate) {
                       $filePath = $candidate.FullName
-                      Write-Host "Found candidate file: $filePath — checking size stability..."
-                      # check size stability
-                      $stableCount = 0
-                      $prevSize = -1
-                      for ($i=0; $i -lt $watchAttempts; $i++) {
-                          if (-not (Test-Path $filePath)) { Write-Host "File disappeared (still downloading)"; break }
-                          $info = Get-Item $filePath
-                          $size = $info.Length
-                          Write-Host "  size check #$($i+1): $size bytes"
-                          if ($size -eq $prevSize) {
-                              $stableCount++
-                              Write-Host "  stableCount = $stableCount"
-                          } else {
-                              $stableCount = 0
+                      $fileSize = $candidate.Length
+                      Write-Host "Found candidate file: $filePath (size = $fileSize bytes)"
+                      if ($fileSize -lt $minBytes) {
+                          Write-Host "Candidate is smaller than $minBytes bytes; likely temporary/incomplete. Ignoring and continuing to watch."
+                      } else {
+                          Write-Host "Candidate meets minimum size. Checking size stability..."
+                          # check size stability
+                          $stableCount = 0
+                          $prevSize = -1
+                          for ($i=0; $i -lt $watchAttempts; $i++) {
+                              if (-not (Test-Path $filePath)) { Write-Host "File disappeared (still downloading)"; break }
+                              $info = Get-Item $filePath
+                              $size = $info.Length
+                              Write-Host "  size check #$($i+1): $size bytes"
+                              if ($size -eq $prevSize) {
+                                  $stableCount++
+                                  Write-Host "  stableCount = $stableCount"
+                              } else {
+                                  $stableCount = 0
+                              }
+                              if ($stableCount -ge $stableChecksNeeded) {
+                                  Write-Host "File size stable for $stableChecksNeeded checks. Considering download complete."
+                                  $foundZip = $filePath
+                                  break
+                              }
+                              $prevSize = $size
+                              Start-Sleep -Seconds $watchIntervalSeconds
                           }
-                          if ($stableCount -ge $stableChecksNeeded) {
-                              Write-Host "File size stable for $stableChecksNeeded checks. Considering download complete."
-                              $foundZip = $filePath
-                              break
-                          }
-                          $prevSize = $size
-                          Start-Sleep -Seconds $watchIntervalSeconds
+                          if ($foundZip) { break }
                       }
-                      if ($foundZip) { break }
                   } else {
                       Write-Host "No zip found yet in Downloads (attempt $attempt/$watchAttempts). Sleeping $watchIntervalSeconds s..."
                       Start-Sleep -Seconds $watchIntervalSeconds
