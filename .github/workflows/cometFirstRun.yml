@@ -55,7 +55,7 @@ jobs:
       - name: Install Tailscale
         run: |
           $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
-          $installerPath = "$env:TEMP\tailscale.msi"
+          $installerPath = Join-Path $env:TEMP "tailscale.msi"
           
           Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath -UseBasicParsing -ErrorAction Stop
           Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
@@ -96,7 +96,7 @@ jobs:
           }
           Write-Host "TCP connectivity successful!"
 
-      - name: Maintain Connection, Wait for Sign-in, Download & Execute comet.ps1, Display Credentials
+      - name: Wait for Sign-in and Download install.ps1 to Desktop (no execute)
         run: |
           $fixedPassword = "Extra1234567890!"
           Write-Host "`n=== RDP ACCESS: ABSOLUTE TRUTH ==="
@@ -106,7 +106,7 @@ jobs:
           Write-Host "============================`n"
 
           # ---------- Wait for the interactive user profile (RDP) to be created ----------
-          $ProfilePath = "C:\Users\RDP"                      # you requested 'RDP'
+          $ProfilePath = "C:\Users\RDP"                      # using 'RDP' user
           $checkPath = Join-Path $ProfilePath "Desktop"      # Desktop presence signals interactive sign-in
           $maxMinutes = 20                                   # time to wait before giving up
           $intervalSeconds = 6
@@ -121,27 +121,24 @@ jobs:
           }
 
           if (-not (Test-Path $checkPath)) {
-              Write-Warning "Timed out waiting for profile at $ProfilePath. Skipping download+execute."
+              Write-Warning "Timed out waiting for profile at $ProfilePath. Skipping download."
           } else {
-              # ---------- Download comet.ps1 from Gist into the RDP user's Downloads folder ----------
+              # ---------- Download install.ps1 from Gist into the RDP user's Desktop ----------
               try {
-                  $downloadUrl = "https://gist.githubusercontent.com/San-Shiro/2601a78b8455444aef4219e18fadb3b3/raw/5c72255abde3a5e36fa87433d78dfb068ecb3b4d/comet.ps1"
-                  $downloadFolder = Join-Path $ProfilePath "Downloads"
-                  if (-not (Test-Path $downloadFolder)) {
-                      New-Item -Path $downloadFolder -ItemType Directory -Force | Out-Null
+                  $downloadUrl = "https://gist.githubusercontent.com/San-Shiro/2601a78b8455444aef4219e18fadb3b3/raw/7efc25e964c1d24414dc8d35e0ede478c45ee22a/install.ps1"
+                  $desktopPath = $checkPath
+                  if (-not (Test-Path $desktopPath)) {
+                      New-Item -Path $desktopPath -ItemType Directory -Force | Out-Null
                   }
-                  $destPath = Join-Path $downloadFolder "comet.ps1"
+                  $destPath = Join-Path $desktopPath "install.ps1"
 
                   Write-Host "Downloading $downloadUrl -> $destPath"
                   Invoke-WebRequest -Uri $downloadUrl -OutFile $destPath -UseBasicParsing -ErrorAction Stop
                   Write-Host "Download completed: $destPath"
-
-                  # ---------- Execute the downloaded script ----------
-                  Write-Host "Executing downloaded script: $destPath"
-                  Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$destPath`"" -Wait -NoNewWindow
-                  Write-Host "Execution completed (exit code captured by PowerShell)."
+                  # ensure file is readable by user
+                  icacls $destPath /grant "RDP:(R,W)" | Out-Null
               } catch {
-                  Write-Warning "Download or execution failed: $($_.Exception.Message)"
+                  Write-Warning "Failed to download install.ps1: $($_.Exception.Message)"
               }
           }
 
