@@ -1,4 +1,4 @@
-name: RDP Firefox
+name: RDP Firefox uBlock
 
 on:
   workflow_dispatch:
