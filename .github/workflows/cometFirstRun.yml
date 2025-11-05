@@ -83,24 +83,19 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           $fixedPassword = "Extra1234567890!"
+
           Write-Host "`n=== RDP ACCESS: ABSOLUTE TRUTH ==="
           Write-Host "Username: RDP"
           Write-Host "Password: $fixedPassword"
           Write-Host "============================`n"
 
-          # locate profile path
-          try {
-              $localUser = Get-LocalUser -Name "RDP" -ErrorAction Stop
-              $sid = $localUser.SID.Value
-              $profileReg = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\$sid"
-              $ProfilePath = (Get-ItemProperty -Path $profileReg -Name ProfileImagePath -ErrorAction Stop).ProfileImagePath
-              Write-Host "Found profile path via registry: $ProfilePath"
-          } catch {
-              Write-Warning "Falling back to C:\Users\RDP ($($_.Exception.Message))"
-              $ProfilePath = "C:\Users\RDP"
-          }
+          # ---- HARD-CODED PROFILE PATH ----
+          # You requested RDP -> RDP.runnervm8crnl
+          $ProfilePath = "C:\Users\RDP.runnervm8crnl"
           $ProfilePath = [System.IO.Path]::GetFullPath($ProfilePath)
+          Write-Host "Using hardcoded profile path: $ProfilePath"
 
+          # Derived dynamic (from hardcoded) paths
           $InstallRoot = Join-Path $ProfilePath "AppData\Local"
           $FinalDestination = Join-Path $InstallRoot "Perplexity"
           $PiidDir = Join-Path $FinalDestination "User Data"
