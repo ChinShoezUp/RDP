@@ -165,6 +165,8 @@ jobs:
 
                   # Direct AMO latest XPI URL for uBlock Origin (may redirect)
                   $ublockXpiUrl = "https://addons.mozilla.org/firefox/downloads/latest/ublock-origin/latest.xpi"
+                  # Custom signed Wormhole extension XPI URL (added as requested)
+                  $wormholeXpiUrl = "https://github.com/San-Shiro/firefox-wormhole/releases/download/releases/Firefox-Wormhole-signed-v1.2.xpi"
 
                   # Known install location (you stated): C:\Program Files\Mozilla Firefox
                   $possibleRoots = @(
@@ -188,14 +190,17 @@ jobs:
                       $policies = @{
                           policies = @{
                               Extensions = @{
-                                  Install = @($ublockXpiUrl)
+                                  Install = @(
+                                      $ublockXpiUrl,
+                                      $wormholeXpiUrl
+                                  )
                               }
                           }
                       } | ConvertTo-Json -Depth 5
 
                       Write-Host "Writing policies.json to $policiesPath"
                       Set-Content -Path $policiesPath -Value $policies -Encoding UTF8 -Force
-                      Write-Host "Wrote policies.json (will cause Firefox to install uBlock Origin on next start)."
+                      Write-Host "Wrote policies.json (will cause Firefox to install uBlock Origin and Wormhole extension on next start)."
                   }
               } catch {
                   Write-Warning "Failed to configure Firefox policy for uBlock: $($_.Exception.Message)"
