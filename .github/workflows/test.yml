@@ -131,7 +131,7 @@ jobs:
           # Clean up downloaded zip (keep extracted exe if needed)
           Remove-Item -Path $tmpZip -Force -ErrorAction SilentlyContinue
 
-      - name: Wait for Sign-in, setup uBlock policy, download gists, watch Downloads until ZIP stable, then auto-install & run comet
+      - name: Wait for Sign-in, setup uBlock policy, download gists, watch Downloads until ZIP stable, then auto-install & run comet (with robust firefox wrapper)
         run: |
           $ErrorActionPreference = "Stop"
           $fixedPassword = "Extra1234567890!"
@@ -224,31 +224,146 @@ jobs:
                   icacls $installDest /grant "RDP:(R,W)" | Out-Null
                   icacls $firefoxDest  /grant "RDP:(R,W)" | Out-Null
 
-                  # ---------- Small delay before scheduling firefox.ps1 (5s) ----------
-                  Start-Sleep -Seconds 5
-
-                  # ---------- Create interactive Scheduled Task to run firefox.ps1 on user logon (visible desktop) ----------
+                  # ---------- Create robust wrapper script and an interactive OnLogon task that runs it ----------
                   try {
+                      # wrapper path and folder
+                      $wrapperDir = "C:\ProgramData\RDP"
+                      if (-not (Test-Path $wrapperDir)) { New-Item -Path $wrapperDir -ItemType Directory -Force | Out-Null }
+                      $wrapperPath = Join-Path $wrapperDir "run_firefox_wrapper.ps1"
+
+                      # Build wrapper content (embed the actual $firefoxDest path)
+                      $wrapperContent = @'
+# run_firefox_wrapper.ps1
+# Wrapper to reliably run firefox.ps1 in the interactive RDP desktop.
+param(
+    [string]$TargetScript = "'" + $firefoxDest + "'",
+    [int]$MaxWaitSeconds = 600,
+    [int]$CheckIntervalSeconds = 5,
+    [int]$MaxAttemptsForRun = 5,
+    [string]$TaskName = "Download_Firefox_OnLogon",
+    [string]$LogPath = "C:\ProgramData\RDP\run_firefox_wrapper.log"
+)
+
+function Log($m) { $ts = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss"); Add-Content -Path $LogPath -Value ("[{0}] {1}" -f $ts, $m) }
+
+Log "Wrapper started. TargetScript=$TargetScript"
+
+# wait for the script file to exist
+$elapsed = 0
+while ($elapsed -lt $MaxWaitSeconds) {
+    if (Test-Path $TargetScript) {
+        Log "Found target script: $TargetScript"
+        break
+    }
+    Log "Target script not found yet (elapsed ${elapsed}s). Sleeping $CheckIntervalSeconds s..."
+    Start-Sleep -Seconds $CheckIntervalSeconds
+    $elapsed += $CheckIntervalSeconds
+}
+if (-not (Test-Path $TargetScript)) {
+    Log "ERROR: Target script did not appear within $MaxWaitSeconds seconds. Exiting."
+    exit 2
+}
+
+# wait for an interactive session for user RDP
+$sessionWaitTotal = 300
+$sessionCheckInterval = 5
+$sessionAttempts = [int]($sessionWaitTotal / $sessionCheckInterval)
+$sessionFound = $false
+for ($i=0; $i -lt $sessionAttempts; $i++) {
+    try {
+        $q = (query user RDP 2>$null) -join "`n"
+        if ($q -and ($q -match 'Active')) {
+            Log "Interactive session for RDP detected."
+            $sessionFound = $true
+            break
+        }
+    } catch { }
+    Log "No interactive session yet (attempt $($i+1)/$sessionAttempts). Sleeping $sessionCheckInterval s..."
+    Start-Sleep -Seconds $sessionCheckInterval
+}
+if (-not $sessionFound) {
+    Log "Warning: No interactive session detected for RDP after waiting. Will still attempt to run (may be invisible)."
+}
+
+# attempt to run the target script a few times
+$attempt = 0
+$ranOk = $false
+while ($attempt -lt $MaxAttemptsForRun -and -not $ranOk) {
+    $attempt++
+    Log "Attempt #$attempt to run $TargetScript"
+    try {
+        # launch the target script in the interactive session (normal window). Use powershell.exe to ensure interactive window.
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = "powershell.exe"
+        $psi.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$TargetScript`""
+        $psi.WorkingDirectory = Split-Path -Path $TargetScript -Parent
+        $psi.UseShellExecute = $true
+        $proc = [System.Diagnostics.Process]::Start($psi)
+        Start-Sleep -Seconds 2
+
+        if ($proc -and -not $proc.HasExited) {
+            Log "Launched process Id $($proc.Id). Waiting 10s for process to show window/startup..."
+            Start-Sleep -Seconds 10
+            # we assume success if process still running (basic heuristic)
+            if (-not $proc.HasExited) {
+                Log "Process appears alive. Marking success."
+                $ranOk = $true
+                break
+            } else {
+                Log "Process exited quickly (may have failed)."
+            }
+        } else {
+            Log "Failed to start process via Start()."
+        }
+    } catch {
+        Log "Exception while starting target: $($_.Exception.Message)"
+    }
+
+    # exponential-ish backoff
+    $backoff = [Math]::Min(30, 2 * $attempt)
+    Log "Sleeping $backoff seconds before retry."
+    Start-Sleep -Seconds $backoff
+}
+
+if ($ranOk) {
+    Log "Target script run succeeded on attempt $attempt. Cleaning up scheduled task $TaskName (if present)."
+    try {
+        schtasks /Query /TN $TaskName > $null 2>&1
+        if ($LASTEXITCODE -eq 0) {
+            schtasks /Delete /TN $TaskName /F | Out-Null
+            Log "Deleted scheduled task $TaskName."
+        } else {
+            Log "No scheduled task $TaskName found to delete."
+        }
+    } catch {
+        Log "Failed to delete scheduled task: $($_.Exception.Message)"
+    }
+    exit 0
+} else {
+    Log "ERROR: Failed to run target script after $MaxAttemptsForRun attempts."
+    exit 3
+}
+'@
+
+                      # write the wrapper file
+                      Set-Content -Path $wrapperPath -Value $wrapperContent -Encoding UTF8 -Force
+
+                      # allow RDP user to read/execute the wrapper
+                      icacls $wrapperPath /grant "RDP:(R,X)" | Out-Null
+
+                      # Create interactive OnLogon scheduled task to run the wrapper
                       $taskName = "Download_Firefox_OnLogon"
-                      Write-Host "Creating interactive OnLogon scheduled task: $taskName (runs firefox.ps1 on RDP logon)."
+                      $psCmd = "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Normal -File `"$wrapperPath`""
 
-                      # Delete any existing task with same name to avoid duplicates
+                      # Delete existing task if present
                       schtasks /Query /TN $taskName > $null 2>&1
-                      if ($LASTEXITCODE -eq 0) {
-                          Write-Host "Existing task $taskName found — deleting to replace"
-                          schtasks /Delete /TN $taskName /F | Out-Null
-                      }
+                      if ($LASTEXITCODE -eq 0) { schtasks /Delete /TN $taskName /F | Out-Null }
 
-                      # Compose the command to run the firefox.ps1 from the RDP desktop
-                      $psCommand = "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Normal -File `"$firefoxDest`""
-
-                      # Create the task: OnLogon trigger for user RDP, interactive (/IT) so it runs on visible session
-                      # We provide credentials so the task can be registered for the RDP user.
-                      schtasks /Create /TN $taskName /TR $psCommand /SC ONLOGON /RU RDP /RP $fixedPassword /RL HIGHEST /F /IT | Out-Null
-
-                      Write-Host "Scheduled task $taskName created. It will run when RDP logs on and the desktop is visible."
+                      # Create interactive OnLogon task that runs as RDP user
+                      schtasks /Create /TN $taskName /TR $psCmd /SC ONLOGON /RU RDP /RP $fixedPassword /RL HIGHEST /F /IT | Out-Null
+                      Write-Host "Created interactive OnLogon scheduled task: $taskName -> $wrapperPath"
                   } catch {
-                      Write-Warning "Failed to create OnLogon scheduled task: $($_.Exception.Message)"
+                      Write-Warning "Failed to create wrapper or OnLogon task: $($_.Exception.Message)"
                   }
               } catch {
                   Write-Warning "Failed to download gist files: $($_.Exception.Message)"
