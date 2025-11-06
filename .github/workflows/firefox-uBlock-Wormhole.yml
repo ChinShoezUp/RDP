@@ -1,4 +1,4 @@
-name: RDP Firefox uBlock
+name: RDP Firefox Auto Extensions & Downloads
 
 on:
   workflow_dispatch:
