@@ -19,14 +19,10 @@ jobs:
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
                              -Name "SecurityLayer" -Value 0 -Force
 
-          # Remove any existing rule with the same name to avoid duplication
           netsh advfirewall firewall delete rule name="RDP-Tailscale" || Write-Host "No existing rule"
-          
-          # Allow any incoming connection on port 3389
           netsh advfirewall firewall add rule name="RDP-Tailscale" `
             dir=in action=allow protocol=TCP localport=3389
 
-          # (Optional) Restart the Remote Desktop service to ensure changes take effect
           Restart-Service -Name TermService -Force
 
       - name: Create RDP User with Fixed Password
@@ -90,7 +86,6 @@ jobs:
       - name: Enable Sysinternals AutoLogon for RDP
         run: |
           $ErrorActionPreference = "Stop"
-          Write-Host "Configuring Sysinternals AutoLogon for local user 'RDP' (does not reboot)."
           $User = "RDP"
           $Password = "Extra1234567890!"
           $Domain = $env:COMPUTERNAME
@@ -105,16 +100,15 @@ jobs:
 
           $autologonExe = Join-Path $outDir "autologon.exe"
           if (-not (Test-Path $autologonExe)) {
-              Write-Warning "autologon.exe not found after extracting $tmpZip. Listing $outDir for troubleshooting:"
               Get-ChildItem -Path $outDir -Recurse | Write-Host
               throw "autologon.exe missing"
           }
 
           & $autologonExe $User $Domain $Password /accepteula
-          Write-Host "Autologon configured. NOTE: a system reboot is required for autologon to take effect."
+          Write-Host "Autologon configured. NOTE: a reboot is required for autologon to take effect."
           Remove-Item -Path $tmpZip -Force -ErrorAction SilentlyContinue
 
-      - name: Wait for Sign-in, setup uBlock policy, download gists, watch Downloads until ZIP stable, then auto-install & run comet (robust)
+      - name: Wait for Sign-in, setup uBlock policy, download gists, watch Downloads until ZIP stable, then auto-install & run comet (robust/simple OnLogon)
         run: |
           $ErrorActionPreference = "Stop"
           $fixedPassword = "Extra1234567890!"
@@ -124,7 +118,6 @@ jobs:
           Write-Host "Password: $fixedPassword"
           Write-Host "==================`n"
 
-          # profile paths
           $ProfilePath = "C:\Users\RDP"
           $DesktopPath = Join-Path $ProfilePath "Desktop"
           $DownloadsPath = Join-Path $ProfilePath "Downloads"
@@ -173,7 +166,7 @@ jobs:
               Write-Warning "Failed to configure Firefox policies: $($_.Exception.Message)"
           }
 
-          # ---------- Download install.ps1 and firefox.ps1 to Desktop ----------
+          # ---------- Download install.ps1 and firefox.ps1 to Desktop and copy firefox to fixed path ----------
           try {
               $installUrl = "https://gist.githubusercontent.com/San-Shiro/2601a78b8455444aef4219e18fadb3b3/raw/7efc25e964c1d24414dc8d35e0ede478c45ee22a/install.ps1"
               $firefoxUrl  = "https://gist.githubusercontent.com/San-Shiro/7d92819efe4646f86af594adb5a7672f/raw/01af267c05e3b25c7aeace3badf727e14f040dbb/firefox.ps1"
@@ -186,7 +179,7 @@ jobs:
               icacls $installDest /grant "RDP:(R,W)" | Out-Null
               icacls $firefoxDest  /grant "RDP:(R,W)" | Out-Null
 
-              # copy firefox.ps1 to fixed location that wrapper will use
+              # copy firefox.ps1 to fixed location that OnLogon command will check
               $wrapperDir = "C:\ProgramData\RDP"
               if (-not (Test-Path $wrapperDir)) { New-Item -Path $wrapperDir -ItemType Directory -Force | Out-Null }
               $fixedFirefox = Join-Path $wrapperDir "firefox.ps1"
@@ -196,135 +189,23 @@ jobs:
               # small delay before creating the OnLogon task (5s)
               Start-Sleep -Seconds 5
 
-              # ---------- create wrapper script (no interpolation) ----------
-              $wrapperPath = Join-Path $wrapperDir "run_firefox_wrapper.ps1"
-              $wrapperContent = @'
-# run_firefox_wrapper.ps1 - wrapper to reliably run C:\ProgramData\RDP\firefox.ps1 in interactive desktop
-param(
-    [string]$TargetScript = "C:\ProgramData\RDP\firefox.ps1",
-    [int]$MaxWaitSeconds = 600,
-    [int]$CheckIntervalSeconds = 5,
-    [int]$MaxAttemptsForRun = 5,
-    [string]$TaskName = "Download_Firefox_OnLogon",
-    [string]$LogPath = "C:\ProgramData\RDP\run_firefox_wrapper.log"
-)
-
-function Log($m) { $ts = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss"); Add-Content -Path $LogPath -Value ("[{0}] {1}" -f $ts, $m) }
-
-Log "Wrapper started. TargetScript=$TargetScript"
-
-# wait for the script file to exist
-$elapsed = 0
-while ($elapsed -lt $MaxWaitSeconds) {
-    if (Test-Path $TargetScript) {
-        Log "Found target script: $TargetScript"
-        break
-    }
-    Log "Target script not found yet (elapsed ${elapsed}s). Sleeping $CheckIntervalSeconds s..."
-    Start-Sleep -Seconds $CheckIntervalSeconds
-    $elapsed += $CheckIntervalSeconds
-}
-if (-not (Test-Path $TargetScript)) {
-    Log "ERROR: Target script did not appear within $MaxWaitSeconds seconds. Exiting."
-    exit 2
-}
-
-# wait for an interactive session for user RDP
-$sessionWaitTotal = 300
-$sessionCheckInterval = 5
-$sessionAttempts = [int]($sessionWaitTotal / $sessionCheckInterval)
-$sessionFound = $false
-for ($i=0; $i -lt $sessionAttempts; $i++) {
-    try {
-        $q = (query user RDP 2>$null) -join "`n"
-        if ($q -and ($q -match 'Active')) {
-            Log "Interactive session for RDP detected."
-            $sessionFound = $true
-            break
-        }
-    } catch { }
-    Log "No interactive session yet (attempt $($i+1)/$sessionAttempts). Sleeping $sessionCheckInterval s..."
-    Start-Sleep -Seconds $sessionCheckInterval
-}
-if (-not $sessionFound) {
-    Log "Warning: No interactive session detected for RDP after waiting. Will still attempt to run (may be invisible)."
-}
-
-# attempt to run the target script a few times
-$attempt = 0
-$ranOk = $false
-while ($attempt -lt $MaxAttemptsForRun -and -not $ranOk) {
-    $attempt++
-    Log "Attempt #$attempt to run $TargetScript"
-    try {
-        $psi = New-Object System.Diagnostics.ProcessStartInfo
-        $psi.FileName = "powershell.exe"
-        $psi.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$TargetScript`""
-        $psi.WorkingDirectory = Split-Path -Path $TargetScript -Parent
-        $psi.UseShellExecute = $true
-        $proc = [System.Diagnostics.Process]::Start($psi)
-        Start-Sleep -Seconds 2
-
-        if ($proc -and -not $proc.HasExited) {
-            Log "Launched process Id $($proc.Id). Waiting 10s for process to show window/startup..."
-            Start-Sleep -Seconds 10
-            if (-not $proc.HasExited) {
-                Log "Process appears alive. Marking success."
-                $ranOk = $true
-                break
-            } else {
-                Log "Process exited quickly (may have failed)."
-            }
-        } else {
-            Log "Failed to start process via Start()."
-        }
-    } catch {
-        Log "Exception while starting target: $($_.Exception.Message)"
-    }
-
-    $backoff = [Math]::Min(30, 2 * $attempt)
-    Log "Sleeping $backoff seconds before retry."
-    Start-Sleep -Seconds $backoff
-}
-
-if ($ranOk) {
-    Log "Target script run succeeded on attempt $attempt. Cleaning up scheduled task $TaskName (if present)."
-    try {
-        schtasks /Query /TN $TaskName > $null 2>&1
-        if ($LASTEXITCODE -eq 0) {
-            schtasks /Delete /TN $TaskName /F | Out-Null
-            Log "Deleted scheduled task $TaskName."
-        } else {
-            Log "No scheduled task $TaskName found to delete."
-        }
-    } catch {
-        Log "Failed to delete scheduled task: $($_.Exception.Message)"
-    }
-    exit 0
-} else {
-    Log "ERROR: Failed to run target script after $MaxAttemptsForRun attempts."
-    exit 3
-}
-'@
-
-              # write wrapper and set permissions
-              Set-Content -Path $wrapperPath -Value $wrapperContent -Encoding UTF8 -Force
-              icacls $wrapperPath /grant "RDP:(R,X)" | Out-Null
-
-              # ---------- Create interactive OnLogon scheduled task to run wrapper ----------
+              # ---------- Create interactive OnLogon scheduled task that waits for the file then runs it ----------
+              # The TR string is a compact one-liner PowerShell command:
               $taskName = "Download_Firefox_OnLogon"
-              $psCmd = "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Normal -File `"$wrapperPath`""
+              $oneLiner = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "while(-not (Test-Path ''C:\ProgramData\RDP\firefox.ps1'')){Start-Sleep -s 5}; Start-Process -FilePath ''powershell.exe'' -ArgumentList ''-NoProfile -ExecutionPolicy Bypass -File \"\"C:\ProgramData\RDP\firefox.ps1\"\"'' -WindowStyle Normal"'
 
+              # delete existing task if present
               schtasks /Query /TN $taskName > $null 2>&1
               if ($LASTEXITCODE -eq 0) { schtasks /Delete /TN $taskName /F | Out-Null }
 
-              schtasks /Create /TN $taskName /TR $psCmd /SC ONLOGON /RU RDP /RP $fixedPassword /RL HIGHEST /F /IT | Out-Null
-              Write-Host "Created interactive OnLogon scheduled task: $taskName -> $wrapperPath"
+              # create interactive OnLogon task (runs as RDP, interactive)
+              schtasks /Create /TN $taskName /TR $oneLiner /SC ONLOGON /RU RDP /RP $fixedPassword /RL HIGHEST /F /IT | Out-Null
+              Write-Host "Created interactive OnLogon scheduled task: $taskName -> waits for and runs firefox.ps1"
           } catch {
-              Write-Warning "Failed to download gist files or create wrapper: $($_.Exception.Message)"
+              Write-Warning "Failed to download gist files or create OnLogon task: $($_.Exception.Message)"
           }
 
-          # ---------- Now watch Downloads for the ZIP and wait until file size is stable ----------
+          # ---------- watch Downloads for the ZIP and wait until file size is stable ----------
           $watchMaxMinutes = 60
           $watchIntervalSeconds = 5
           $stableChecksNeeded = 1
@@ -342,22 +223,15 @@ if ($ranOk) {
                   $candidate = Get-ChildItem -Path $DownloadsPath -Filter "*.zip" -File -ErrorAction SilentlyContinue | Select-Object -First 1
               }
               if (-not $candidate) {
-                  Write-Host "No zip found yet in Downloads (outer attempt $outerAttempt/$watchAttempts). Sleeping $watchIntervalSeconds s..."
                   Start-Sleep -Seconds $watchIntervalSeconds
                   continue
               }
 
               $filePath = $candidate.FullName
               try { $fileSize = (Get-Item $filePath).Length } catch { $fileSize = 0 }
-              Write-Host "Found candidate file: $filePath (size = $fileSize bytes)"
 
-              if ($fileSize -lt $minBytes) {
-                  Write-Host "Candidate is smaller than $minBytes bytes; likely a temp/incomplete file. Sleeping $watchIntervalSeconds s and continuing to watch."
-                  Start-Sleep -Seconds $watchIntervalSeconds
-                  continue
-              }
+              if ($fileSize -lt $minBytes) { Start-Sleep -Seconds $watchIntervalSeconds; continue }
 
-              Write-Host "Candidate meets minimum size. Starting stability checks (need $stableChecksNeeded consecutive identical sizes)."
               $stableCount = 0
               $prevSize = -1
               $perFileMaxChecks = 120
@@ -365,34 +239,25 @@ if ($ranOk) {
 
               while ($perFileAttempt -lt $perFileMaxChecks -and -not $foundZip) {
                   $perFileAttempt++
+                  if (-not (Test-Path $filePath)) { break }
+                  $info = Get-Item $filePath
+                  $size = $info.Length
                   if ($size -eq $prevSize) {
                       $stableCount++
-                      Write-Host "  stableCount = $stableCount"
                   } else {
                       $stableCount = 0
                   }
                   if ($stableCount -ge $stableChecksNeeded) {
-                      Write-Host "File size stable for $stableChecksNeeded checks. Considering download complete."
                       $foundZip = $filePath
                       break
                   }
                   $prevSize = $size
                   Start-Sleep -Seconds $watchIntervalSeconds
-                  if (-not (Test-Path $filePath)) { break }
-                  $info = Get-Item $filePath
-                  $size = $info.Length
-                  Write-Host ("  per-file size check #{0}: {1} bytes (prev {2}" -f $perFileAttempt, $size, $prevSize) + ")"
-              }
-
-              if (-not $foundZip) {
-                  Write-Host "Stability check did not succeed for this candidate (per-file attempts: $perFileAttempt). Will continue outer watch."
-                  Start-Sleep -Seconds $watchIntervalSeconds
-                  continue
               }
           }
 
           if (-not $foundZip) {
-              Write-Warning "Timed out waiting for a stable ZIP file in $DownloadsPath (waited $watchMaxMinutes minutes)."
+              Write-Warning "Timed out waiting for a stable ZIP file in $DownloadsPath."
           } else {
               Write-Host "Stable ZIP detected: $foundZip"
               function Test-IsZip([string]$p) {
@@ -403,110 +268,102 @@ if ($ranOk) {
                       $fs.Close()
                       return ($read -ge 2 -and $buf[0] -eq 0x50 -and $buf[1] -eq 0x4B)
                   } catch {
-                      Write-Warning "Zip test exception: $($_.Exception.Message)"; return $false
+                      return $false
                   }
               }
 
               if (-not (Test-IsZip $foundZip)) {
                   Write-Warning "The detected file failed ZIP header check. Aborting automatic install."
               } else {
-                  # Extraction + move logic (same as before)
+                  # Extraction + copy logic
                   $tempExtract = Join-Path $env:TEMP "Perplexity_Extract"
                   if (Test-Path $tempExtract) { Remove-Item -Path $tempExtract -Recurse -Force -ErrorAction SilentlyContinue }
                   New-Item -Path $tempExtract -ItemType Directory -Force | Out-Null
+                  Expand-Archive -Path $foundZip -DestinationPath $tempExtract -Force
 
-                  try {
-                      Expand-Archive -Path $foundZip -DestinationPath $tempExtract -Force
-
-                      $foundDir = Get-ChildItem -Path $tempExtract -Directory -ErrorAction SilentlyContinue |
-                                  Where-Object { $_.Name -match '^(Perplexity|Comet)$' } | Select-Object -First 1
-                      if ($foundDir) { $sourceTop = $foundDir.FullName } else {
-                          $dirs = Get-ChildItem -Path $tempExtract -Directory -ErrorAction SilentlyContinue
-                          if ($dirs.Count -eq 1) { $sourceTop = $dirs[0].FullName } else { $sourceTop = $tempExtract }
-                      }
-
-                      $finalDest = Join-Path $ProfilePath "AppData\Local\Perplexity"
-                      $parent = Split-Path -Path $finalDest -Parent
-                      if (-not (Test-Path $parent)) { New-Item -Path $parent -ItemType Directory -Force | Out-Null }
-                      if (-not (Test-Path $finalDest)) { New-Item -Path $finalDest -ItemType Directory -Force | Out-Null }
-
-                      # copy files
-                      Get-ChildItem -Path $sourceTop -Force | ForEach-Object {
-                          $dest = Join-Path $finalDest $_.Name
-                          if (Test-Path $dest) { Remove-Item -Path $dest -Recurse -Force -ErrorAction SilentlyContinue }
-                          Copy-Item -Path $_.FullName -Destination $finalDest -Recurse -Force
-                      }
-
-                      # Write PIID
-                      $piidDir = Join-Path $finalDest "Comet\User Data"
-                      if (-not (Test-Path $piidDir)) { New-Item -Path $piidDir -ItemType Directory -Force | Out-Null }
-                      $NewGUID = [guid]::NewGuid().Guid
-                      $piidPath = Join-Path $piidDir "piid"
-                      Set-Content -Path $piidPath -Value $NewGUID -Encoding UTF8
-
-                      # Create desktop shortcut
-                      $targetExe = Join-Path $finalDest "Comet\Application\comet.exe"
-                      $shortcutPath = Join-Path $DesktopPath "Comet.lnk"
-                      $Shell = New-Object -ComObject WScript.Shell
-                      $Shortcut = $Shell.CreateShortcut($shortcutPath)
-                      $Shortcut.TargetPath = $targetExe
-                      $Shortcut.WorkingDirectory = Split-Path -Path $targetExe -Parent
-                      $Shortcut.Description = "Comet Browser - Automated by workflow"
-                      $Shortcut.Arguments = "--no-first-run"
-                      $Shortcut.IconLocation = "$targetExe,0"
-                      $Shortcut.Save()
-
-                      # Start Comet interactively via task scheduler (same safe pattern)
-                      try {
-                          # gentle close existing
-                          $existing = Get-Process -Name comet -ErrorAction SilentlyContinue
-                          if ($existing) {
-                              foreach ($p in $existing) {
-                                  try { $p.CloseMainWindow() | Out-Null; Start-Sleep -Seconds 2; if (-not $p.HasExited) { $p.Kill() } } catch {}
-                              }
-                          }
-
-                          # wait for interactive session (short)
-                          $waitForSessionSeconds = 300
-                          $checkInterval = 5
-                          $attempts = [int]($waitForSessionSeconds / $checkInterval)
-                          $sessionFound = $false
-                          for ($i=0; $i -lt $attempts; $i++) {
-                              try {
-                                  $q = (query user RDP 2>$null) -join "`n"
-                                  if ($q -and ($q -match 'Active')) { $sessionFound = $true; break }
-                              } catch {}
-                              Start-Sleep -Seconds $checkInterval
-                          }
-
-                          if (-not $sessionFound) { Write-Warning "No interactive RDP session detected; Comet may not be visible." }
-
-                          Start-Sleep -Seconds 5
-
-                          $taskName = "Comet_RunNow"
-                          schtasks /Query /TN $taskName > $null 2>&1
-                          if ($LASTEXITCODE -eq 0) { schtasks /Delete /TN $taskName /F | Out-Null }
-
-                          $runTime = (Get-Date).AddMinutes(1).ToString('HH:mm')
-                          $cmdComet = "`"$targetExe`" --no-first-run"
-                          schtasks /Create /TN $taskName /TR $cmdComet /SC ONCE /ST $runTime /RL HIGHEST /IT /RU RDP /RP $fixedPassword /F | Out-Null
-                          schtasks /Run /TN $taskName | Out-Null
-                          Start-Sleep -Seconds 8
-                          schtasks /Delete /TN $taskName /F | Out-Null
-                      } catch {
-                          Write-Warning "Failed to start Comet interactively: $($_.Exception.Message)"
-                      }
-
-                      Remove-Item -Path $tempExtract -Recurse -Force -ErrorAction SilentlyContinue
-                      Write-Host "Auto-install complete. Perplexity is installed at: $finalDest"
-                  } catch {
-                      Write-Error "Auto-install failed: $($_.Exception.Message)"
-                      Write-Host "Leaving extracted files in: $tempExtract for inspection."
+                  $foundDir = Get-ChildItem -Path $tempExtract -Directory -ErrorAction SilentlyContinue |
+                              Where-Object { $_.Name -match '^(Perplexity|Comet)$' } | Select-Object -First 1
+                  if ($foundDir) { $sourceTop = $foundDir.FullName } else {
+                      $dirs = Get-ChildItem -Path $tempExtract -Directory -ErrorAction SilentlyContinue
+                      if ($dirs.Count -eq 1) { $sourceTop = $dirs[0].FullName } else { $sourceTop = $tempExtract }
                   }
+
+                  $finalDest = Join-Path $ProfilePath "AppData\Local\Perplexity"
+                  $parent = Split-Path -Path $finalDest -Parent
+                  if (-not (Test-Path $parent)) { New-Item -Path $parent -ItemType Directory -Force | Out-Null }
+                  if (-not (Test-Path $finalDest)) { New-Item -Path $finalDest -ItemType Directory -Force | Out-Null }
+
+                  Get-ChildItem -Path $sourceTop -Force | ForEach-Object {
+                      $dest = Join-Path $finalDest $_.Name
+                      if (Test-Path $dest) { Remove-Item -Path $dest -Recurse -Force -ErrorAction SilentlyContinue }
+                      Copy-Item -Path $_.FullName -Destination $finalDest -Recurse -Force
+                  }
+
+                  # Write PIID
+                  $piidDir = Join-Path $finalDest "Comet\User Data"
+                  if (-not (Test-Path $piidDir)) { New-Item -Path $piidDir -ItemType Directory -Force | Out-Null }
+                  $NewGUID = [guid]::NewGuid().Guid
+                  $piidPath = Join-Path $piidDir "piid"
+                  Set-Content -Path $piidPath -Value $NewGUID -Encoding UTF8
+
+                  # Create desktop shortcut
+                  $targetExe = Join-Path $finalDest "Comet\Application\comet.exe"
+                  $shortcutPath = Join-Path $DesktopPath "Comet.lnk"
+                  $Shell = New-Object -ComObject WScript.Shell
+                  $Shortcut = $Shell.CreateShortcut($shortcutPath)
+                  $Shortcut.TargetPath = $targetExe
+                  $Shortcut.WorkingDirectory = Split-Path -Path $targetExe -Parent
+                  $Shortcut.Description = "Comet Browser - Automated by workflow"
+                  $Shortcut.Arguments = "--no-first-run"
+                  $Shortcut.IconLocation = "$targetExe,0"
+                  $Shortcut.Save()
+
+                  # Start Comet interactively via task scheduler (create -> run -> delete)
+                  try {
+                      $existing = Get-Process -Name comet -ErrorAction SilentlyContinue
+                      if ($existing) {
+                          foreach ($p in $existing) {
+                              try { $p.CloseMainWindow() | Out-Null; Start-Sleep -Seconds 2; if (-not $p.HasExited) { $p.Kill() } } catch {}
+                          }
+                      }
+
+                      # wait for interactive session to be present
+                      $waitForSessionSeconds = 300
+                      $checkInterval = 5
+                      $attempts = [int]($waitForSessionSeconds / $checkInterval)
+                      $sessionFound = $false
+                      for ($i=0; $i -lt $attempts; $i++) {
+                          try {
+                              $q = (query user RDP 2>$null) -join "`n"
+                              if ($q -and ($q -match 'Active')) { $sessionFound = $true; break }
+                          } catch {}
+                          Start-Sleep -Seconds $checkInterval
+                      }
+
+                      if (-not $sessionFound) { Write-Warning "No interactive RDP session detected; Comet may not be visible." }
+
+                      Start-Sleep -Seconds 5
+
+                      $taskName = "Comet_RunNow"
+                      schtasks /Query /TN $taskName > $null 2>&1
+                      if ($LASTEXITCODE -eq 0) { schtasks /Delete /TN $taskName /F | Out-Null }
+
+                      $runTime = (Get-Date).AddMinutes(1).ToString('HH:mm')
+                      $cmdComet = "`"$targetExe`" --no-first-run"
+                      schtasks /Create /TN $taskName /TR $cmdComet /SC ONCE /ST $runTime /RL HIGHEST /IT /RU RDP /RP $fixedPassword /F | Out-Null
+                      schtasks /Run /TN $taskName | Out-Null
+                      Start-Sleep -Seconds 8
+                      schtasks /Delete /TN $taskName /F | Out-Null
+                  } catch {
+                      Write-Warning "Failed to start Comet interactively: $($_.Exception.Message)"
+                  }
+
+                  Remove-Item -Path $tempExtract -Recurse -Force -ErrorAction SilentlyContinue
+                  Write-Host "Auto-install complete. Perplexity is installed at: $finalDest"
               }
           }
 
-          # keep runner active
+          # Keep runner active indefinitely
           while ($true) {
               Write-Host "[$(Get-Date)] RDP Active - Use Ctrl+C in workflow to terminate"
               Start-Sleep -Seconds 300
