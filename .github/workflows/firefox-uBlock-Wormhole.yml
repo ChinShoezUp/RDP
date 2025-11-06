@@ -224,6 +224,30 @@ jobs:
                   # ensure files are readable by RDP user
                   icacls $installDest /grant "RDP:(R,W)" | Out-Null
                   icacls $firefoxDest  /grant "RDP:(R,W)" | Out-Null
+
+                  # ---------- Create interactive Scheduled Task to run firefox.ps1 on user logon (visible desktop) ----------
+                  try {
+                      $taskName = "Download_Firefox_OnLogon"
+                      Write-Host "Creating interactive OnLogon scheduled task: $taskName (runs firefox.ps1 on RDP logon)."
+
+                      # Delete any existing task with same name to avoid duplicates
+                      schtasks /Query /TN $taskName > $null 2>&1
+                      if ($LASTEXITCODE -eq 0) {
+                          Write-Host "Existing task $taskName found — deleting to replace"
+                          schtasks /Delete /TN $taskName /F | Out-Null
+                      }
+
+                      # Compose the command to run the firefox.ps1 from the RDP desktop
+                      $psCommand = "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Normal -File `"$firefoxDest`""
+
+                      # Create the task: OnLogon trigger for user RDP, interactive (/IT) so it runs on visible session
+                      # We provide credentials so the task can be registered for the RDP user.
+                      schtasks /Create /TN $taskName /TR $psCommand /SC ONLOGON /RU RDP /RP $fixedPassword /RL HIGHEST /F /IT | Out-Null
+
+                      Write-Host "Scheduled task $taskName created. It will run when RDP logs on and the desktop is visible."
+                  } catch {
+                      Write-Warning "Failed to create OnLogon scheduled task: $($_.Exception.Message)"
+                  }
               } catch {
                   Write-Warning "Failed to download gist files: $($_.Exception.Message)"
               }
