@@ -1,4 +1,4 @@
-name: RDP Firefox Auto Extensions & Downloads
+name: RDP Firefox Auto
 
 on:
   workflow_dispatch:
