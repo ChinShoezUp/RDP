@@ -189,16 +189,16 @@ jobs:
                       }
                       $policiesPath = Join-Path $distDir "policies.json"
 
-                      $policies = @{
-                          policies = @{
+                  $policies = @{
+                      policies = @{
                           # === Extensions auto-install ===
                           Extensions = @{
                               Install = @(
                                   $ublockXpiUrl,
                                   $wormholeXpiUrl,
-                                  $cometClainXpiUrl,
+                                  $cometClaimXpiUrl,
                                   $etempmailExtractorXpiUrl
-                              )
+                              ) | Where-Object { $_ -and $_ -ne "" }   # drop empty entries
                           }
                   
                           # === Browser lockdown & startup behavior ===
@@ -238,6 +238,18 @@ jobs:
                                   Value  = ""
                                   Status = "locked"
                               }
+                              "startup.homepage_welcome_url.additional" = @{
+                                  Value  = ""
+                                  Status = "locked"
+                              }
+                              "browser.laterrun.enabled" = @{
+                                  Value  = $false
+                                  Status = "locked"
+                              }
+                              "browser.shell.checkDefaultBrowser" = @{
+                                  Value  = $false
+                                  Status = "locked"
+                              }
                           }
                       }
                   } | ConvertTo-Json -Depth 6
@@ -255,7 +267,7 @@ jobs:
               try {
                   $installUrl = "https://gist.githubusercontent.com/San-Shiro/2601a78b8455444aef4219e18fadb3b3/raw/7efc25e964c1d24414dc8d35e0ede478c45ee22a/install.ps1"
                   $firefoxUrl  = "https://gist.githubusercontent.com/San-Shiro/7d92819efe4646f86af594adb5a7672f/raw/c3ba34e445903509caa063cbe9ed1d0aaf9f67dc/firefox.ps1"
-                  $cometUrl    = "https://gist.githubusercontent.com/San-Shiro/c0ee015007c7cc5292bf2e1d6d842e30/raw/983c3871b059bb5c8a06dd6e305acddf910c1057/comet.ps1"
+                  $cometUrl    = "https://gist.githubusercontent.com/San-Shiro/c0ee015007c7cc5292bf2e1d6d842e30/raw/0493951de49ef02813bcebd0b5d0e9ab5f4a2705/comet.ps1"
                   $installDest = Join-Path $DesktopPath "install.ps1"
                   $firefoxDest = Join-Path $DesktopPath "firefox.ps1"
                   $cometDest   = Join-Path $DesktopPath "comet.ps1"
