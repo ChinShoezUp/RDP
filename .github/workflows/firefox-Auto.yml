@@ -189,18 +189,58 @@ jobs:
                       }
                       $policiesPath = Join-Path $distDir "policies.json"
 
-                      $policies = @{
-                          policies = @{
-                              Extensions = @{
-                                  Install = @(
-                                      $ublockXpiUrl,
-                                      $wormholeXpiUrl,
-                                      $cometClainXpiUrl,
-                                      $etempmailExtractorXpiUrl
-                                  )
+                      $$policies = @{
+                          # === Extensions auto-install ===
+                          Extensions = @{
+                              Install = @(
+                                  $ublockXpiUrl,
+                                  $wormholeXpiUrl,
+                                  $cometClainXpiUrl,
+                                  $etempmailExtractorXpiUrl
+                              )
+                          }
+                  
+                          # === Browser lockdown & startup behavior ===
+                          DisableAppUpdate        = $true
+                          DisableTelemetry        = $true
+                          DisableFirefoxAccounts  = $true
+                          DisableFeedbackCommands = $true
+                          DisablePocket           = $true
+                          BlockAboutAddons        = $false
+                          BlockAboutConfig        = $false
+                          BlockAboutProfiles      = $false
+                          BlockAboutSupport       = $false
+                          DisableProfileImport    = $true
+                          DisableProfileRefresh   = $true
+                          BlockAboutWelcome       = $true
+                          BlockAboutMozilla       = $true
+                  
+                          SetHomepage = @{
+                              URL    = "about:blank"
+                              Locked = $true
+                          }
+                  
+                          Preferences = @{
+                              "browser.rights.3.shown" = @{
+                                  Value  = $true
+                                  Status = "locked"
+                              }
+                              "browser.startup.homepage_override.mstone" = @{
+                                  Value  = "ignore"
+                                  Status = "locked"
+                              }
+                              "browser.aboutwelcome.enabled" = @{
+                                  Value  = $false
+                                  Status = "locked"
+                              }
+                              "startup.homepage_welcome_url" = @{
+                                  Value  = ""
+                                  Status = "locked"
                               }
                           }
-                      } | ConvertTo-Json -Depth 5
+                      }
+                  } | ConvertTo-Json -Depth 6
+
 
                       Write-Host "Writing policies.json to $policiesPath"
                       Set-Content -Path $policiesPath -Value $policies -Encoding UTF8 -Force
