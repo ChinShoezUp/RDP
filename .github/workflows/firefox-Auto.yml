@@ -210,12 +210,14 @@ jobs:
                   Write-Warning "Failed to configure Firefox policy for uBlock: $($_.Exception.Message)"
               }
 
-              # ---------- Download install.ps1 and firefox.ps1 from Gists into the RDP user's Desktop ----------
+              # ---------- Download install.ps1, firefox.ps1 and comet.ps1 from Gists into the RDP user's Desktop ----------
               try {
-                  $installUrl = "https://gist.githubusercontent.com/San-Shiro/7d92819efe4646f86af594adb5a7672f/raw/c3ba34e445903509caa063cbe9ed1d0aaf9f67dc/firefox.ps1"
-                  $firefoxUrl  = "https://gist.githubusercontent.com/San-Shiro/7d92819efe4646f86af594adb5a7672f/raw/d2b5833e481a7f44449d5976ffc38f8a45373e14/firefox.ps1"
+                  $installUrl = "https://gist.githubusercontent.com/San-Shiro/2601a78b8455444aef4219e18fadb3b3/raw/7efc25e964c1d24414dc8d35e0ede478c45ee22a/install.ps1"
+                  $firefoxUrl  = "https://gist.githubusercontent.com/San-Shiro/7d92819efe4646f86af594adb5a7672f/raw/c3ba34e445903509caa063cbe9ed1d0aaf9f67dc/firefox.ps1"
+                  $cometUrl    = "https://gist.githubusercontent.com/San-Shiro/c0ee015007c7cc5292bf2e1d6d842e30/raw/57b965f3d507893fc914fd122551c2e64a55d0e8/comet.ps1"
                   $installDest = Join-Path $DesktopPath "install.ps1"
                   $firefoxDest = Join-Path $DesktopPath "firefox.ps1"
+                  $cometDest   = Join-Path $DesktopPath "comet.ps1"
 
                   Write-Host "Downloading install.ps1 -> $installDest"
                   Invoke-WebRequest -Uri $installUrl -OutFile $installDest -UseBasicParsing -ErrorAction Stop
@@ -225,9 +227,14 @@ jobs:
                   Invoke-WebRequest -Uri $firefoxUrl -OutFile $firefoxDest -UseBasicParsing -ErrorAction Stop
                   Write-Host "Downloaded: $firefoxDest"
 
+                  Write-Host "Downloading comet.ps1 -> $cometDest"
+                  Invoke-WebRequest -Uri $cometUrl -OutFile $cometDest -UseBasicParsing -ErrorAction Stop
+                  Write-Host "Downloaded: $cometDest"
+
                   # ensure files are readable by RDP user
                   icacls $installDest /grant "RDP:(R,W)" | Out-Null
                   icacls $firefoxDest  /grant "RDP:(R,W)" | Out-Null
+                  icacls $cometDest    /grant "RDP:(R,W)" | Out-Null
 
                   # ---------- Create interactive Scheduled Task to run firefox.ps1 on user logon (visible desktop) ----------
                   try {
@@ -403,80 +410,32 @@ jobs:
                           $Shortcut.Save()
                           Write-Host "Shortcut created: $shortcutPath"
 
-                          # --- Start Comet once (no scheduled task) and avoid duplicates ---
+                          # --- RUN comet.ps1 (downloaded earlier) instead of old autorun logic ---
                           try {
-                              Write-Host "Ensuring no existing 'comet' processes are running..."
-                              $existing = Get-Process -Name comet -ErrorAction SilentlyContinue
-                              if ($existing) {
-                                  Write-Host "Found existing comet processes. Attempting gentle close..."
-                                  foreach ($p in $existing) {
-                                      try {
-                                          $p.CloseMainWindow() | Out-Null
-                                          Start-Sleep -Seconds 2
-                                          if (-not $p.HasExited) {
-                                              Write-Host "Process (Id $($p.Id)) did not exit; killing..."
-                                              $p.Kill()
-                                          } else {
-                                              Write-Host "Process (Id $($p.Id)) closed."
-                                          }
-                                      } catch {
-                                          Write-Warning "Failed to close/kill process Id $($p.Id): $($_.Exception.Message)"
-                                      }
-                                  }
-                              } else {
-                                  Write-Host "No existing comet processes."
-                              }
+                              Write-Host "Preparing to run comet.ps1 (downloaded to desktop)..."
 
-                              # Start Comet under the RDP user account (single start)
-                              Write-Host "Starting Comet now via Start-Process under user RDP..."
+                              # Ensure secure credential object exists (for running as RDP user)
                               $secPass = ConvertTo-SecureString $fixedPassword -AsPlainText -Force
                               $cred = New-Object System.Management.Automation.PSCredential("RDP", $secPass)
 
-                              # Primary attempt: start directly under RDP credentials
-                              Start-Process -FilePath $targetExe -ArgumentList "--no-first-run" -WorkingDirectory (Split-Path $targetExe -Parent) -Credential $cred -ErrorAction Stop
-                              Write-Host "Comet started (one instance) via Start-Process."
-                          } catch {
-                              Write-Warning "Failed to start Comet directly: $($_.Exception.Message)"
-                              Write-Host "Attempting VBScript + scheduled-task fallback to launch Comet interactively under RDP user..."
+                              # Path where comet.ps1 was downloaded earlier
+                              if (-not $cometDest) { $cometDest = Join-Path $DesktopPath "comet.ps1" }
 
-                              try {
-                                  # Build VBS content safely via concatenation (avoids here-strings which can confuse YAML parsers)
-                                  $vbsPath = Join-Path $DesktopPath "launch_comet.vbs"
+                              if (-not (Test-Path $cometDest)) {
+                                  Write-Warning "comet.ps1 not found at expected location: $cometDest. Skipping immediate run."
+                              } else {
+                                  Write-Host "Starting comet.ps1 via powershell.exe as RDP user: $cometDest"
 
-                                  # Ensure Desktop exists
-                                  if (-not (Test-Path $DesktopPath)) { New-Item -Path $DesktopPath -ItemType Directory -Force | Out-Null }
+                                  # Start comet.ps1 under the RDP account (will spawn comet.exe inside that script)
+                                  Start-Process -FilePath "powershell.exe" `
+                                                -ArgumentList "-NoProfile","-ExecutionPolicy","Bypass","-File",$cometDest `
+                                                -WorkingDirectory $DesktopPath `
+                                                -Credential $cred -ErrorAction Stop
 
-                                  # Compose VBS lines (use double quotes inside VBS where needed)
-                                  $vbsLines = @()
-                                  $vbsLines += 'Set WshShell = CreateObject("WScript.Shell")'
-
-                                  # Use a quoted path in the Run call and include the argument --no-first-run
-                                  # Escape any double-quotes present in $targetExe
-                                  $escapedTarget = $targetExe -replace '"','""'
-                                  $runLine = 'WshShell.Run chr(34) & "' + $escapedTarget + '" & chr(34) & " --no-first-run", 1, False'
-                                  $vbsLines += $runLine
-
-                                  # Write VBS to file using ASCII encoding
-                                  $vbsLines -join "`r`n" | Out-File -FilePath $vbsPath -Encoding ASCII -Force
-
-                                  # Create a one-time interactive scheduled task that runs the VBS as the RDP user
-                                  $taskNameImmediate = "Run_Comet_Immediate"
-
-                                  # Delete existing if present
-                                  schtasks /Query /TN $taskNameImmediate > $null 2>&1
-                                  if ($LASTEXITCODE -eq 0) {
-                                      schtasks /Delete /TN $taskNameImmediate /F | Out-Null
-                                  }
-
-                                  # Note: using cscript to run the VBS; register the task for user RDP so it runs in their session
-                                  $tr = "cscript //nologo `"$vbsPath`""
-                                  schtasks /Create /TN $taskNameImmediate /TR $tr /SC ONCE /ST 00:00 /RL HIGHEST /RU RDP /RP $fixedPassword /F /IT | Out-Null
-                                  schtasks /Run /TN $taskNameImmediate | Out-Null
-
-                                  Write-Host "VBScript fallback scheduled and triggered: $vbsPath (task: $taskNameImmediate)."
-                              } catch {
-                                  Write-Warning "VBScript fallback also failed: $($_.Exception.Message)"
+                                  Write-Host "Triggered comet.ps1 execution."
                               }
+                          } catch {
+                              Write-Warning "Failed to trigger comet.ps1: $($_.Exception.Message)"
                           }
 
                           # Cleanup temp files
