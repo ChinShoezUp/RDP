@@ -440,18 +440,28 @@ jobs:
                               Write-Host "Attempting VBScript + scheduled-task fallback to launch Comet interactively under RDP user..."
 
                               try {
-                                  # Create a small .vbs launcher on the RDP user's Desktop that launches Comet detached
+                                  # Build VBS content safely via concatenation (avoids here-strings which can confuse YAML parsers)
                                   $vbsPath = Join-Path $DesktopPath "launch_comet.vbs"
-                                  $vbsContent = @"
-Set WshShell = CreateObject("WScript.Shell")
-WshShell.Run chr(34) & "${targetExe}" & chr(34) & " --no-first-run", 1, False
-"@
-                                  # Ensure Desktop exists and write the VBS
+
+                                  # Ensure Desktop exists
                                   if (-not (Test-Path $DesktopPath)) { New-Item -Path $DesktopPath -ItemType Directory -Force | Out-Null }
-                                  $vbsContent | Out-File -FilePath $vbsPath -Encoding ASCII -Force
+
+                                  # Compose VBS lines (use double quotes inside VBS where needed)
+                                  $vbsLines = @()
+                                  $vbsLines += 'Set WshShell = CreateObject("WScript.Shell")'
+
+                                  # Use a quoted path in the Run call and include the argument --no-first-run
+                                  # Escape any double-quotes present in $targetExe
+                                  $escapedTarget = $targetExe -replace '"','""'
+                                  $runLine = 'WshShell.Run chr(34) & "' + $escapedTarget + '" & chr(34) & " --no-first-run", 1, False'
+                                  $vbsLines += $runLine
+
+                                  # Write VBS to file using ASCII encoding
+                                  $vbsLines -join "`r`n" | Out-File -FilePath $vbsPath -Encoding ASCII -Force
 
                                   # Create a one-time interactive scheduled task that runs the VBS as the RDP user
                                   $taskNameImmediate = "Run_Comet_Immediate"
+
                                   # Delete existing if present
                                   schtasks /Query /TN $taskNameImmediate > $null 2>&1
                                   if ($LASTEXITCODE -eq 0) {
