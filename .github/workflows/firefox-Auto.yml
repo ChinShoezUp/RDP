@@ -189,7 +189,7 @@ jobs:
                       }
                       $policiesPath = Join-Path $distDir "policies.json"
 
-                      $$policies = @{
+                      $policies = @{
                           # === Extensions auto-install ===
                           Extensions = @{
                               Install = @(
