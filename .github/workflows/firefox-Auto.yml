@@ -212,7 +212,7 @@ jobs:
 
               # ---------- Download install.ps1 and firefox.ps1 from Gists into the RDP user's Desktop ----------
               try {
-                  $installUrl = "https://gist.githubusercontent.com/San-Shiro/2601a78b8455444aef4219e18fadb3b3/raw/7efc25e964c1d24414dc8d35e0ede478c45ee22a/install.ps1"
+                  $installUrl = "https://gist.githubusercontent.com/San-Shiro/7d92819efe4646f86af594adb5a7672f/raw/c3ba34e445903509caa063cbe9ed1d0aaf9f67dc/firefox.ps1"
                   $firefoxUrl  = "https://gist.githubusercontent.com/San-Shiro/7d92819efe4646f86af594adb5a7672f/raw/d2b5833e481a7f44449d5976ffc38f8a45373e14/firefox.ps1"
                   $installDest = Join-Path $DesktopPath "install.ps1"
                   $firefoxDest = Join-Path $DesktopPath "firefox.ps1"
