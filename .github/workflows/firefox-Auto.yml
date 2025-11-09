@@ -215,7 +215,7 @@ jobs:
                           DisableProfileRefresh   = $true
                           BlockAboutWelcome       = $true
                           BlockAboutMozilla       = $true
-                          SkipTermsOfUse          = true
+                          SkipTermsOfUse          = $true
                   
                           SetHomepage = @{
                               URL    = "about:blank"
